@@ -25,7 +25,7 @@ $TrybPodgladu=1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/u
 Poprzednia wersja (3), gdyby nowa sprawiała kłopoty (uruchom z PowerShella jako administrator):
 
 ```powershell
-irm https://raw.githubusercontent.com/podkal95/narzedzia/v3/uslugi.ps1 | iex
+irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | iex
 ```
 
 ## Na górnym pasku
