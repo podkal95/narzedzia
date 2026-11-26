@@ -1,24 +1,31 @@
 <#
     Narzedzia serwisowe Windows 10/11 (okienko, po polsku)
     Uruchomienie:  irm https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1 | iex
+    Podglad bez zmian i bez uprawnien administratora:
+                   $TrybPodgladu = 1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1 | iex
 
     Zakladki:
-      Uslugi         - wylaczanie zbednych uslug (Wylaczony / Reczny), kopia + punkt przywracania, cofanie
-      Autostart      - programy uruchamiane z systemem: wlacz / wylacz (tak jak Menedzer zadan, odwracalne)
-      Programy w tle - co teraz dziala i ile zajmuje pamieci, zamykanie, blokada aplikacji w tle
-      Czyszczenie    - pliki tymczasowe, cache aktualizacji, kosz, przegladarki, DISM; ile miejsca zwolniono
-      Bezpieczenstwo - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta
-                       + szybkie naprawy i raport dla klienta na pulpicie
+      Uslugi         - ponad 70 uslug w kategoriach, pakiety, wyszukiwarka, sortowanie,
+                       Wylaczony / Reczny, punkt przywracania + kopia, cofanie zmian
+      Autostart      - programy uruchamiane z systemem: wlacz / wylacz (jak w Menedzerze zadan)
+      Programy w tle - co dziala i ile zajmuje pamieci, zamykanie, blokada aplikacji w tle
+      Czyszczenie    - pliki tymczasowe, cache aktualizacji, kosz, przegladarki, DISM
+      Bezpieczenstwo - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM,
+                       BitLocker, konta + szybkie naprawy i raport dla klienta
 
+    Kliknij naglowek kolumny, zeby posortowac. Nic nie jest zaznaczone na starcie.
     Nic nie pobiera i nie instaluje. Kopie i log: C:\ProgramData\UslugiKopia
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
+$WersjaNarzedzia = '3.0'
 
-# ---------- uruchomienie jako administrator ----------
+# ---------- uprawnienia ----------
 $czyAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $czyAdmin) {
+$trybPodgladu = [bool](Get-Variable -Name 'TrybPodgladu' -ValueOnly -ErrorAction SilentlyContinue)
+
+if (-not $czyAdmin -and -not $trybPodgladu) {
     if ($PSCommandPath) {
         $polecenie = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     } else {
@@ -33,10 +40,25 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $folderKopii = Join-Path $env:ProgramData 'UslugiKopia'
-New-Item -ItemType Directory -Force -Path $folderKopii | Out-Null
+if ($czyAdmin) { New-Item -ItemType Directory -Force -Path $folderKopii | Out-Null }
+else { $folderKopii = Join-Path $env:TEMP 'UslugiKopia'; New-Item -ItemType Directory -Force -Path $folderKopii | Out-Null }
 $plikLogu = Join-Path $folderKopii ('log_{0:yyyyMMdd}.txt' -f (Get-Date))
 $NL = [Environment]::NewLine
 $stan = @{ Zaladowane = @{}; Bezpieczenstwo = @() }
+
+# ---------- kolory ----------
+$kolorAkcent      = [System.Drawing.Color]::FromArgb(255, 122, 26)
+$kolorAkcentCiemny = [System.Drawing.Color]::FromArgb(234, 100, 8)
+$kolorCiemny      = [System.Drawing.Color]::FromArgb(17, 24, 39)
+$kolorTekst       = [System.Drawing.Color]::FromArgb(31, 41, 55)
+$kolorSzary       = [System.Drawing.Color]::FromArgb(107, 114, 128)
+$kolorLinia       = [System.Drawing.Color]::FromArgb(229, 231, 235)
+$kolorTlo         = [System.Drawing.Color]::FromArgb(243, 244, 246)
+$kolorPodpowiedz  = [System.Drawing.Color]::FromArgb(255, 247, 237)
+$kolorZaznaczenie = [System.Drawing.Color]::FromArgb(255, 228, 204)
+$kolorWiersz2     = [System.Drawing.Color]::FromArgb(249, 250, 251)
+$czcionka         = New-Object System.Drawing.Font('Segoe UI', 9.75)
+$czcionkaGruba    = New-Object System.Drawing.Font('Segoe UI Semibold', 9.75)
 
 # =====================================================================
 #  DANE: USLUGI
@@ -199,12 +221,32 @@ $listaCzyszczenia = @(
 )
 
 # =====================================================================
-#  FUNKCJE OGOLNE
+#  DANE: PAKIETY USLUG (zaznaczaja gotowe zestawy, niczego same nie zmieniaja)
+# =====================================================================
+$pakiety = [ordered]@{
+    'Wszystkie zalecane (bezpieczne)'                 = @('*ZALECANE*')
+    'Prywatność: telemetria i raporty do Microsoft'   = @('DiagTrack', 'dmwappushservice', 'InventorySvc', 'diagnosticshub.standardcollector.service',
+                                                          'WerSvc', 'wercplsupport')
+    'Słabszy komputer: mniej pracy w tle'             = @('SysMain', 'WSearch', 'TrkWks', 'DiagTrack', 'WerSvc', 'PcaSvc', 'InventorySvc')
+    'Bez drukarki i skanera'                          = @('Spooler', 'PrintNotify', 'Fax', 'StiSvc', 'WiaRpc')
+    'Bez Xbox i gier ze Sklepu'                       = @('XblAuthManager', 'XblGameSave', 'XboxNetApiSvc', 'XboxGipSvc')
+    'Komputer stacjonarny (bez funkcji laptopa)'      = @('SensorService', 'SensrSvc', 'SensorDataService', 'WwanSvc', 'wlpasvc',
+                                                          'autotimesvc', 'SEMgrSvc', 'NaturalAuthentication')
+    'Bez zdalnego dostępu (RDP, WinRM, rejestr)'      = @('RemoteRegistry', 'TermService', 'SessionEnv', 'UmRdpService', 'WinRM')
+    'Bez udostępniania w sieci lokalnej'              = @('LanmanServer', 'FDResPub', 'fdPHost', 'SSDPSRV', 'upnphost', 'SharedAccess',
+                                                          'WebClient', 'lltdsvc', 'QWAVE', 'SNMPTRAP', 'MSiSCSI')
+    'Bez Mixed Reality i usług firmowych'             = @('spectrum', 'perceptionsimulation', 'MixedRealityOpenXRSvc', 'SharedRealitySvc',
+                                                          'workfolderssvc', 'Wecsvc', 'CscService')
+    'Bez telefonu (Łącze z telefonem, SMS)'           = @('PhoneSvc', 'SmsRouter')
+}
+
+# =====================================================================
+#  FUNKCJE OGOLNE I WYGLAD
 # =====================================================================
 function Log([string]$tekst) {
     $linia = '{0:HH:mm:ss}  {1}' -f (Get-Date), $tekst
     $logBox.AppendText($linia + $NL)
-    Add-Content -LiteralPath $plikLogu -Value $linia -Encoding UTF8
+    try { Add-Content -LiteralPath $plikLogu -Value $linia -Encoding UTF8 } catch { }
     [System.Windows.Forms.Application]::DoEvents()
 }
 
@@ -214,6 +256,13 @@ function Pytanie([string]$tekst) {
 
 function Info([string]$tekst) {
     [void][System.Windows.Forms.MessageBox]::Show($tekst, 'Informacja', 'OK', 'Information')
+}
+
+function Wymaga-Admina {
+    if ($czyAdmin) { return $true }
+    Info ('Tryb podglądu: program działa bez uprawnień administratora, więc zmiany są wyłączone.' + $NL +
+        'Uruchom komendę bez $TrybPodgladu, żeby móc wprowadzać zmiany.')
+    $false
 }
 
 function Zajety([bool]$tak) {
@@ -230,6 +279,17 @@ function Tekst-Rozmiaru([long]$bajty) {
     '0 MB'
 }
 
+function Kolor([string]$nazwa) {
+    switch ($nazwa) {
+        'OK'        { [System.Drawing.Color]::FromArgb(21, 128, 61) }
+        'UWAGA'     { [System.Drawing.Color]::FromArgb(194, 65, 12) }
+        'ŹLE'       { [System.Drawing.Color]::FromArgb(185, 28, 28) }
+        'INFO'      { [System.Drawing.Color]::FromArgb(29, 78, 216) }
+        'Wyłączony' { [System.Drawing.Color]::FromArgb(156, 163, 175) }
+        default     { $kolorTekst }
+    }
+}
+
 function Nowa-Siatka {
     $g = New-Object System.Windows.Forms.DataGridView
     $g.Dock = 'Fill'
@@ -242,24 +302,73 @@ function Nowa-Siatka {
     $g.AutoSizeRowsMode = 'AllCells'
     $g.BackgroundColor = [System.Drawing.Color]::White
     $g.BorderStyle = 'None'
+    $g.CellBorderStyle = 'SingleHorizontal'
+    $g.GridColor = $kolorLinia
+    $g.RowTemplate.MinimumHeight = 34
+
+    $g.EnableHeadersVisualStyles = $false
+    $g.ColumnHeadersBorderStyle = 'None'
+    $g.ColumnHeadersHeightSizeMode = 'DisableResizing'
+    $g.ColumnHeadersHeight = 38
+    $g.ColumnHeadersDefaultCellStyle.BackColor = $kolorCiemny
+    $g.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $g.ColumnHeadersDefaultCellStyle.SelectionBackColor = $kolorCiemny
+    $g.ColumnHeadersDefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+    $g.ColumnHeadersDefaultCellStyle.Font = $czcionkaGruba
+    $g.ColumnHeadersDefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(6, 0, 6, 0)
+
+    $g.DefaultCellStyle.Font = $czcionka
+    $g.DefaultCellStyle.ForeColor = $kolorTekst
     $g.DefaultCellStyle.WrapMode = 'True'
-    $g.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(4)
-    $g.ColumnHeadersHeightSizeMode = 'AutoSize'
+    $g.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(6, 4, 6, 4)
+    $g.DefaultCellStyle.SelectionBackColor = $kolorZaznaczenie
+    $g.DefaultCellStyle.SelectionForeColor = $kolorTekst
+    $g.AlternatingRowsDefaultCellStyle.BackColor = $kolorWiersz2
+    $g.AlternatingRowsDefaultCellStyle.SelectionBackColor = $kolorZaznaczenie
+    $g.AlternatingRowsDefaultCellStyle.SelectionForeColor = $kolorTekst
+
+    # zaznaczenie checkboxa od razu (bez czekania na opuszczenie komorki)
     $g.Add_CurrentCellDirtyStateChanged({
         param($nadawca, $zdarzenie)
         if ($nadawca.IsCurrentCellDirty) {
             [void]$nadawca.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
         }
     })
+    $g.Add_CellValueChanged({ Aktualizuj-Status })
+
+    # sortowanie liczbowe dla kolumn, ktore maja w Tag nazwe wlasciwosci (np. Pamiec, Bajty, Waga)
+    $g.Add_SortCompare({
+        param($nadawca, $e)
+        $klucz = [string]$e.Column.Tag
+        if (-not $klucz) { return }
+        $a = $nadawca.Rows[$e.RowIndex1].Tag
+        $b = $nadawca.Rows[$e.RowIndex2].Tag
+        $va = 0.0; $vb = 0.0
+        if ($a -and $a.PSObject.Properties[$klucz]) { $va = [double]$a.$klucz }
+        if ($b -and $b.PSObject.Properties[$klucz]) { $vb = [double]$b.$klucz }
+        $wynik = $va.CompareTo($vb)
+        if ($wynik -eq 0) {
+            $wynik = [string]::Compare([string]$nadawca.Rows[$e.RowIndex1].Cells[1].Value, [string]$nadawca.Rows[$e.RowIndex2].Cells[1].Value)
+        }
+        $e.SortResult = $wynik
+        $e.Handled = $true
+    })
     $g
 }
 
-function Dodaj-Kolumne($siatka, [string]$typ, [string]$tytul, [int]$szerokosc) {
-    if ($typ -eq 'Check') { $c = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn }
-    else { $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn; $c.ReadOnly = $true }
+function Dodaj-Kolumne($siatka, [string]$typ, [string]$tytul, [int]$szerokosc, [string]$kluczSortowania) {
+    if ($typ -eq 'Check') {
+        $c = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+        $c.SortMode = 'NotSortable'
+        $c.HeaderCell.Style.Alignment = 'MiddleCenter'
+    } else {
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.ReadOnly = $true
+        $c.SortMode = 'Automatic'
+        if ($kluczSortowania) { $c.Tag = $kluczSortowania }
+    }
     $c.HeaderText = $tytul
-    $c.SortMode = 'NotSortable'
-    if ($szerokosc -gt 0) { $c.Width = $szerokosc } else { $c.AutoSizeMode = 'Fill' }
+    if ($szerokosc -gt 0) { $c.Width = $szerokosc } else { $c.AutoSizeMode = 'Fill'; $c.MinimumWidth = 160 }
     [void]$siatka.Columns.Add($c)
 }
 
@@ -269,7 +378,8 @@ function Nowy-PanelPrzyciskow {
     $p.AutoSize = $true
     $p.AutoSizeMode = 'GrowAndShrink'
     $p.WrapContents = $true
-    $p.Padding = New-Object System.Windows.Forms.Padding(6, 8, 6, 4)
+    $p.BackColor = $kolorTlo
+    $p.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 6)
     $p
 }
 
@@ -277,23 +387,57 @@ function Nowy-Przycisk($panel, [string]$tekst, [bool]$glowny) {
     $b = New-Object System.Windows.Forms.Button
     $b.Text = $tekst
     $b.AutoSize = $true
-    $b.Height = 34
-    $b.Padding = New-Object System.Windows.Forms.Padding(8, 0, 8, 0)
+    $b.MinimumSize = New-Object System.Drawing.Size(0, 34)
+    $b.Padding = New-Object System.Windows.Forms.Padding(10, 0, 10, 0)
+    $b.Margin = New-Object System.Windows.Forms.Padding(3)
+    $b.FlatStyle = 'Flat'
+    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
     if ($glowny) {
-        $b.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
-        $b.BackColor = [System.Drawing.Color]::FromArgb(255, 122, 26)
-        $b.ForeColor = [System.Drawing.Color]::Black
-        $b.FlatStyle = 'Flat'
+        $b.Font = $czcionkaGruba
+        $b.BackColor = $kolorAkcent
+        $b.ForeColor = $kolorCiemny
+        $b.FlatAppearance.BorderColor = $kolorAkcentCiemny
+        $b.FlatAppearance.MouseOverBackColor = $kolorAkcentCiemny
+    } else {
+        $b.Font = $czcionka
+        $b.BackColor = [System.Drawing.Color]::White
+        $b.ForeColor = $kolorTekst
+        $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(209, 213, 219)
+        $b.FlatAppearance.MouseOverBackColor = $kolorLinia
     }
     [void]$panel.Controls.Add($b)
     $b
 }
 
+function Nowa-Etykieta($panel, [string]$tekst, [int]$lewyOdstep) {
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $tekst
+    $l.AutoSize = $true
+    $l.ForeColor = $kolorSzary
+    $l.Margin = New-Object System.Windows.Forms.Padding($lewyOdstep, 11, 2, 0)
+    [void]$panel.Controls.Add($l)
+    $l
+}
+
+function Nowa-Lista($panel, [int]$szerokosc, [string[]]$pozycje) {
+    $c = New-Object System.Windows.Forms.ComboBox
+    $c.DropDownStyle = 'DropDownList'
+    $c.FlatStyle = 'Flat'
+    $c.Width = $szerokosc
+    $c.Margin = New-Object System.Windows.Forms.Padding(2, 7, 6, 0)
+    foreach ($p in $pozycje) { [void]$c.Items.Add($p) }
+    if ($c.Items.Count -gt 0) { $c.SelectedIndex = 0 }
+    [void]$panel.Controls.Add($c)
+    $c
+}
+
 function Nowy-Naglowek([string]$tekst) {
     $l = New-Object System.Windows.Forms.Label
     $l.Dock = 'Top'
-    $l.Height = 56
-    $l.Padding = New-Object System.Windows.Forms.Padding(8, 8, 8, 4)
+    $l.Height = 58
+    $l.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 6)
+    $l.BackColor = $kolorPodpowiedz
+    $l.ForeColor = $kolorTekst
     $l.Text = $tekst
     $l
 }
@@ -301,6 +445,7 @@ function Nowy-Naglowek([string]$tekst) {
 function Nowa-Zakladka([string]$tytul, $siatka, [string]$naglowek, $panel) {
     $t = New-Object System.Windows.Forms.TabPage
     $t.Text = $tytul
+    $t.BackColor = [System.Drawing.Color]::White
     $t.Controls.Add($siatka)
     $t.Controls.Add((Nowy-Naglowek $naglowek))
     $t.Controls.Add($panel)
@@ -315,17 +460,32 @@ function Zaznaczone($siatka) {
 
 function Odznacz-Wszystko($siatka) {
     foreach ($r in $siatka.Rows) { $r.Cells[0].Value = $false }
+    Aktualizuj-Status
 }
 
-function Kolor([string]$nazwa) {
-    switch ($nazwa) {
-        'OK'    { [System.Drawing.Color]::ForestGreen }
-        'UWAGA' { [System.Drawing.Color]::DarkOrange }
-        'ŹLE'   { [System.Drawing.Color]::Firebrick }
-        'INFO'  { [System.Drawing.Color]::SteelBlue }
-        'Wyłączony' { [System.Drawing.Color]::Gray }
-        default { [System.Drawing.Color]::Black }
+function Aktualizuj-Status {
+    if (-not $statusLbl -or -not $zakladki) { return }
+    $t = $zakladki.SelectedTab
+    if ($t -eq $tabBezp) {
+        $w = @($stan.Bezpieczenstwo)
+        $statusLbl.Text = ('Do naprawy: {0}    Do poprawy: {1}    W porządku: {2}' -f
+            @($w | Where-Object { $_.Ocena -eq 'ŹLE' }).Count,
+            @($w | Where-Object { $_.Ocena -eq 'UWAGA' }).Count,
+            @($w | Where-Object { $_.Ocena -eq 'OK' }).Count)
+        return
     }
+    $siatka = $null
+    if ($t -eq $tabUslugi) { $siatka = $siatkaU }
+    elseif ($t -eq $tabAutostart) { $siatka = $siatkaA }
+    elseif ($t -eq $tabProgramy) { $siatka = $siatkaP }
+    elseif ($t -eq $tabCzyszczenie) { $siatka = $siatkaC }
+    if (-not $siatka) { $statusLbl.Text = ''; return }
+    $wszystkie = $siatka.Rows.Count; $widoczne = 0; $zaznaczone = 0
+    foreach ($r in $siatka.Rows) {
+        if ($r.Visible) { $widoczne++ }
+        if ($r.Cells[0].Value -eq $true) { $zaznaczone++ }
+    }
+    $statusLbl.Text = "Pozycji: $wszystkie    Widocznych: $widoczne    Zaznaczonych: $zaznaczone"
 }
 
 # =====================================================================
@@ -498,7 +658,8 @@ function Czy-TloZablokowane {
 #  FUNKCJE: BEZPIECZENSTWO
 # =====================================================================
 function Wynik-Sprawdzenia($nazwa, $wynik, $ocena, $rada) {
-    [pscustomobject]@{ Nazwa = $nazwa; Wynik = $wynik; Ocena = $ocena; Rada = $rada }
+    $waga = switch ($ocena) { 'ŹLE' { 0 } 'UWAGA' { 1 } 'INFO' { 2 } default { 3 } }
+    [pscustomobject]@{ Nazwa = $nazwa; Wynik = $wynik; Ocena = $ocena; Rada = $rada; Waga = $waga }
 }
 
 function Sprawdz-Bezpieczenstwo {
@@ -664,81 +825,121 @@ function Sprawdz-Bezpieczenstwo {
 # =====================================================================
 #  OKNO
 # =====================================================================
-$form = New-Object System.Windows.Forms.Form
-$form.Text = 'Narzędzia serwisowe Windows - ' + $env:COMPUTERNAME
-$form.Size = New-Object System.Drawing.Size(1160, 800)
-$form.MinimumSize = New-Object System.Drawing.Size(940, 620)
-$form.StartPosition = 'CenterScreen'
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
+$infoOS = ''
+try {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $wersja = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue).DisplayVersion
+    $infoOS = $os.Caption
+    if ($wersja) { $infoOS = $infoOS + ' ' + $wersja }
+    $infoOS = $infoOS + ' (kompilacja ' + $os.BuildNumber + ')'
+} catch { }
 
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Narzędzia serwisowe Windows ' + $WersjaNarzedzia + ' - ' + $env:COMPUTERNAME
+$form.Size = New-Object System.Drawing.Size(1220, 840)
+$form.MinimumSize = New-Object System.Drawing.Size(980, 640)
+$form.StartPosition = 'CenterScreen'
+$form.Font = $czcionka
+$form.BackColor = $kolorTlo
+
+# ---------- baner ----------
+$baner = New-Object System.Windows.Forms.Panel
+$baner.Dock = 'Top'
+$baner.Height = 70
+$baner.BackColor = $kolorCiemny
+
+$banerTytul = New-Object System.Windows.Forms.Label
+$banerTytul.Text = 'Narzędzia serwisowe Windows'
+$banerTytul.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16)
+$banerTytul.ForeColor = [System.Drawing.Color]::White
+$banerTytul.AutoSize = $true
+$banerTytul.Location = New-Object System.Drawing.Point(18, 8)
+$baner.Controls.Add($banerTytul)
+
+$banerInfo = New-Object System.Windows.Forms.Label
+$tekstUprawnien = 'administrator'
+if (-not $czyAdmin) { $tekstUprawnien = 'TRYB PODGLĄDU - zmiany wyłączone' }
+$banerInfo.Text = 'Komputer: ' + $env:COMPUTERNAME + '     ' + $infoOS + '     Uprawnienia: ' + $tekstUprawnien
+$banerInfo.ForeColor = [System.Drawing.Color]::FromArgb(209, 213, 219)
+$banerInfo.AutoSize = $true
+$banerInfo.Location = New-Object System.Drawing.Point(21, 42)
+$baner.Controls.Add($banerInfo)
+
+$banerPasek = New-Object System.Windows.Forms.Panel
+$banerPasek.Dock = 'Bottom'
+$banerPasek.Height = 3
+$banerPasek.BackColor = $kolorAkcent
+$baner.Controls.Add($banerPasek)
+
+# ---------- zakladki, dziennik, pasek stanu ----------
 $zakladki = New-Object System.Windows.Forms.TabControl
 $zakladki.Dock = 'Fill'
+$zakladki.Font = New-Object System.Drawing.Font('Segoe UI', 10.5)
+$zakladki.Padding = New-Object System.Drawing.Point(18, 6)
 
 $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Dock = 'Bottom'
-$logBox.Height = 140
+$logBox.Height = 130
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
-$logBox.BackColor = [System.Drawing.Color]::FromArgb(248, 248, 248)
-$logBox.Font = New-Object System.Drawing.Font('Consolas', 9)
+$logBox.BorderStyle = 'None'
+$logBox.BackColor = $kolorCiemny
+$logBox.ForeColor = [System.Drawing.Color]::FromArgb(229, 231, 235)
+$logBox.Font = New-Object System.Drawing.Font('Consolas', 9.5)
+
+$statusBar = New-Object System.Windows.Forms.StatusStrip
+$statusBar.BackColor = $kolorTlo
+$statusBar.SizingGrip = $false
+$statusLbl = New-Object System.Windows.Forms.ToolStripStatusLabel
+$statusLbl.ForeColor = $kolorTekst
+[void]$statusBar.Items.Add($statusLbl)
 
 # ---------- Uslugi ----------
 $siatkaU = Nowa-Siatka
-Dodaj-Kolumne $siatkaU 'Check' 'Wybierz' 70
-Dodaj-Kolumne $siatkaU 'Text' 'Usługa' 230
-Dodaj-Kolumne $siatkaU 'Text' 'Kategoria' 120
-Dodaj-Kolumne $siatkaU 'Text' 'Co robi / co przestanie działać' 0
-Dodaj-Kolumne $siatkaU 'Text' 'Rodzaj' 95
-Dodaj-Kolumne $siatkaU 'Text' 'Stan' 85
-Dodaj-Kolumne $siatkaU 'Text' 'Uruchamianie' 160
+Dodaj-Kolumne $siatkaU 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Usługa' 220 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Kategoria' 120 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Co robi / co przestanie działać' 0 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Rodzaj' 100 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Stan' 95 ''
+Dodaj-Kolumne $siatkaU 'Text' 'Uruchamianie' 165 ''
 
 $panelU = Nowy-PanelPrzyciskow
-$lblTryb = New-Object System.Windows.Forms.Label
-$lblTryb.Text = 'Ustaw na:'
-$lblTryb.AutoSize = $true
-$lblTryb.Margin = New-Object System.Windows.Forms.Padding(4, 9, 2, 0)
-[void]$panelU.Controls.Add($lblTryb)
-$cmbTryb = New-Object System.Windows.Forms.ComboBox
-$cmbTryb.DropDownStyle = 'DropDownList'
-$cmbTryb.Width = 250
-$cmbTryb.Margin = New-Object System.Windows.Forms.Padding(2, 5, 8, 0)
-[void]$cmbTryb.Items.Add('Wyłączony (nie uruchomi się wcale)')
-[void]$cmbTryb.Items.Add('Ręczny (tylko gdy coś jej potrzebuje)')
-$cmbTryb.SelectedIndex = 0
-[void]$panelU.Controls.Add($cmbTryb)
+[void](Nowa-Etykieta $panelU 'Pakiet:' 4)
+$cmbPakiet = Nowa-Lista $panelU 330 ([string[]]$pakiety.Keys)
+$btnPakiet = Nowy-Przycisk $panelU 'Zaznacz pakiet' $false
+[void](Nowa-Etykieta $panelU 'Szukaj:' 16)
+$txtSzukaj = New-Object System.Windows.Forms.TextBox
+$txtSzukaj.Width = 210
+$txtSzukaj.Margin = New-Object System.Windows.Forms.Padding(2, 8, 6, 0)
+[void]$panelU.Controls.Add($txtSzukaj)
+$panelU.SetFlowBreak($txtSzukaj, $true)
+[void](Nowa-Etykieta $panelU 'Ustaw na:' 4)
+$cmbTryb = Nowa-Lista $panelU 270 @('Wyłączony (nie uruchomi się wcale)', 'Ręczny (tylko gdy coś jej potrzebuje)')
 $btnZastosuj = Nowy-Przycisk $panelU 'Zastosuj do zaznaczonych' $true
-$btnZalecane = Nowy-Przycisk $panelU 'Zaznacz zalecane' $false
 $btnOdznaczU = Nowy-Przycisk $panelU 'Odznacz wszystko' $false
 $btnDomyslne = Nowy-Przycisk $panelU 'Przywróć domyślne zaznaczonych' $false
 $btnKopia    = Nowy-Przycisk $panelU 'Przywróć z kopii...' $false
 $btnFolder   = Nowy-Przycisk $panelU 'Folder kopii' $false
-$lblSzukaj = New-Object System.Windows.Forms.Label
-$lblSzukaj.Text = 'Szukaj:'
-$lblSzukaj.AutoSize = $true
-$lblSzukaj.Margin = New-Object System.Windows.Forms.Padding(14, 9, 2, 0)
-[void]$panelU.Controls.Add($lblSzukaj)
-$txtSzukaj = New-Object System.Windows.Forms.TextBox
-$txtSzukaj.Width = 200
-$txtSzukaj.Margin = New-Object System.Windows.Forms.Padding(2, 6, 8, 0)
-[void]$panelU.Controls.Add($txtSzukaj)
 
-$tabUslugi = Nowa-Zakladka 'Usługi' $siatkaU ('Zaznacz usługi, wybierz Wyłączony albo Ręczny i kliknij "Zastosuj do zaznaczonych". ' +
-    'Zalecane (zielone) są bezpieczne i zaznaczone od razu. Opcjonalne (pomarańczowe) zaznacz tylko, jeśli klient z nich nie korzysta. ' +
-    'Przed zmianą tworzony jest punkt przywracania i kopia ustawień. Pole "Szukaj" filtruje po nazwie, kategorii i opisie (np. drukark, bluetooth, sieć).') $panelU
+$tabUslugi = Nowa-Zakladka 'Usługi' $siatkaU ('Zaznacz usługi (albo wybierz gotowy pakiet), ustaw Wyłączony lub Ręczny i kliknij "Zastosuj do zaznaczonych". ' +
+    'Zielone = bezpieczne prawie zawsze, pomarańczowe = tylko gdy klient z tego nie korzysta. Kliknij nagłówek kolumny, żeby posortować. ' +
+    'Przed zmianą tworzony jest punkt przywracania i kopia ustawień.') $panelU
 
 # ---------- Autostart ----------
 $siatkaA = Nowa-Siatka
-Dodaj-Kolumne $siatkaA 'Check' 'Wybierz' 70
-Dodaj-Kolumne $siatkaA 'Text' 'Program' 220
-Dodaj-Kolumne $siatkaA 'Text' 'Polecenie' 0
-Dodaj-Kolumne $siatkaA 'Text' 'Skąd' 190
-Dodaj-Kolumne $siatkaA 'Text' 'Stan' 100
+Dodaj-Kolumne $siatkaA 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaA 'Text' 'Program' 220 ''
+Dodaj-Kolumne $siatkaA 'Text' 'Polecenie' 0 ''
+Dodaj-Kolumne $siatkaA 'Text' 'Skąd' 190 ''
+Dodaj-Kolumne $siatkaA 'Text' 'Stan' 105 ''
 
 $panelA = Nowy-PanelPrzyciskow
-$btnAWylacz = Nowy-Przycisk $panelA 'Wyłącz zaznaczone' $true
-$btnAWlacz  = Nowy-Przycisk $panelA 'Włącz zaznaczone' $false
-$btnAOdswiez = Nowy-Przycisk $panelA 'Odśwież' $false
+$btnAWylacz   = Nowy-Przycisk $panelA 'Wyłącz zaznaczone' $true
+$btnAWlacz    = Nowy-Przycisk $panelA 'Włącz zaznaczone' $false
+$btnAOdznacz  = Nowy-Przycisk $panelA 'Odznacz wszystko' $false
+$btnAOdswiez  = Nowy-Przycisk $panelA 'Odśwież' $false
 $btnAMenedzer = Nowy-Przycisk $panelA 'Menedżer zadań' $false
 
 $tabAutostart = Nowa-Zakladka 'Autostart' $siatkaA ('Programy uruchamiane razem z Windows. Wyłączenie działa tak samo jak w Menedżerze zadań: ' +
@@ -746,58 +947,73 @@ $tabAutostart = Nowa-Zakladka 'Autostart' $siatkaA ('Programy uruchamiane razem 
 
 # ---------- Programy w tle ----------
 $siatkaP = Nowa-Siatka
-Dodaj-Kolumne $siatkaP 'Check' 'Wybierz' 70
-Dodaj-Kolumne $siatkaP 'Text' 'Program' 220
-Dodaj-Kolumne $siatkaP 'Text' 'Opis / ścieżka' 0
-Dodaj-Kolumne $siatkaP 'Text' 'Procesy' 70
-Dodaj-Kolumne $siatkaP 'Text' 'Pamięć' 90
-Dodaj-Kolumne $siatkaP 'Text' 'Okno' 70
+Dodaj-Kolumne $siatkaP 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Program' 200 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Opis / ścieżka' 0 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Procesy' 85 'Liczba'
+Dodaj-Kolumne $siatkaP 'Text' 'Pamięć' 100 'Pamiec'
+Dodaj-Kolumne $siatkaP 'Text' 'Ma okno' 85 ''
 
 $panelP = Nowy-PanelPrzyciskow
-$btnPZakoncz = Nowy-Przycisk $panelP 'Zamknij zaznaczone' $true
-$btnPOdswiez = Nowy-Przycisk $panelP 'Odśwież' $false
-$btnPBlokuj = Nowy-Przycisk $panelP 'Zablokuj aplikacje ze Sklepu w tle' $false
+$btnPZakoncz  = Nowy-Przycisk $panelP 'Zamknij zaznaczone' $true
+$btnPOdznacz  = Nowy-Przycisk $panelP 'Odznacz wszystko' $false
+$btnPOdswiez  = Nowy-Przycisk $panelP 'Odśwież' $false
+$btnPBlokuj   = Nowy-Przycisk $panelP 'Zablokuj aplikacje ze Sklepu w tle' $false
 $btnPOdblokuj = Nowy-Przycisk $panelP 'Przywróć aplikacje w tle' $false
 
-$tabProgramy = Nowa-Zakladka 'Programy w tle' $siatkaP ('Programy działające teraz (bez procesów systemowych), od zajmujących najwięcej pamięci. "Okno: nie" = działa w tle. ' +
+$tabProgramy = Nowa-Zakladka 'Programy w tle' $siatkaP ('Programy działające teraz (bez procesów systemowych), od zajmujących najwięcej pamięci. "Ma okno: nie" = działa w tle. ' +
     'Zamknięcie jest jednorazowe; żeby program nie wracał, wyłącz go w zakładce Autostart.') $panelP
 
 # ---------- Czyszczenie ----------
 $siatkaC = Nowa-Siatka
-Dodaj-Kolumne $siatkaC 'Check' 'Wybierz' 70
-Dodaj-Kolumne $siatkaC 'Text' 'Co wyczyścić' 260
-Dodaj-Kolumne $siatkaC 'Text' 'Opis' 0
-Dodaj-Kolumne $siatkaC 'Text' 'Rozmiar' 110
+Dodaj-Kolumne $siatkaC 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaC 'Text' 'Co wyczyścić' 260 ''
+Dodaj-Kolumne $siatkaC 'Text' 'Opis' 0 ''
+Dodaj-Kolumne $siatkaC 'Text' 'Rozmiar' 115 'Bajty'
 
 $panelC = Nowy-PanelPrzyciskow
-$btnWyczysc  = Nowy-Przycisk $panelC 'Wyczyść zaznaczone' $true
-$btnPrzelicz = Nowy-Przycisk $panelC 'Przelicz rozmiar' $false
-$btnOdznaczC = Nowy-Przycisk $panelC 'Odznacz wszystko' $false
+$btnWyczysc     = Nowy-Przycisk $panelC 'Wyczyść zaznaczone' $true
+$btnCBezpieczne = Nowy-Przycisk $panelC 'Zaznacz bezpieczne' $false
+$btnOdznaczC    = Nowy-Przycisk $panelC 'Odznacz wszystko' $false
+$btnPrzelicz    = Nowy-Przycisk $panelC 'Przelicz rozmiar' $false
 
 $tabCzyszczenie = Nowa-Zakladka 'Czyszczenie' $siatkaC ('Zaznacz, co usunąć, i kliknij "Wyczyść zaznaczone". Pliki w użyciu są pomijane, więc nic się nie zepsuje. ' +
-    'Kosz, przeglądarki, zrzuty pamięci i DISM są domyślnie odznaczone.') $panelC
+    '"Zaznacz bezpieczne" wybiera pliki tymczasowe, cache aktualizacji i raporty błędów. Kosz, przeglądarki, zrzuty pamięci i DISM wybierasz sam.') $panelC
 
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
-Dodaj-Kolumne $siatkaB 'Text' 'Sprawdzenie' 200
-Dodaj-Kolumne $siatkaB 'Text' 'Wynik' 0
-Dodaj-Kolumne $siatkaB 'Text' 'Ocena' 80
-Dodaj-Kolumne $siatkaB 'Text' 'Co zrobić' 330
+Dodaj-Kolumne $siatkaB 'Text' 'Sprawdzenie' 210 ''
+Dodaj-Kolumne $siatkaB 'Text' 'Wynik' 0 ''
+Dodaj-Kolumne $siatkaB 'Text' 'Ocena' 90 'Waga'
+Dodaj-Kolumne $siatkaB 'Text' 'Co zrobić' 340 ''
 
 $panelB = Nowy-PanelPrzyciskow
-$btnBRaport   = Nowy-Przycisk $panelB 'Zapisz raport na pulpit' $true
-$btnBOdswiez  = Nowy-Przycisk $panelB 'Sprawdź ponownie' $false
+$btnBRaport     = Nowy-Przycisk $panelB 'Zapisz raport na pulpit' $true
+$btnBOdswiez    = Nowy-Przycisk $panelB 'Sprawdź ponownie' $false
 $btnBAktualizuj = Nowy-Przycisk $panelB 'Aktualizuj Defendera' $false
-$btnBSkan     = Nowy-Przycisk $panelB 'Szybkie skanowanie' $false
-$btnBZapora   = Nowy-Przycisk $panelB 'Włącz zaporę' $false
-$btnBSmb      = Nowy-Przycisk $panelB 'Wyłącz SMBv1' $false
-$btnBUpdate   = Nowy-Przycisk $panelB 'Windows Update' $false
+$btnBSkan       = Nowy-Przycisk $panelB 'Szybkie skanowanie' $false
+$btnBZapora     = Nowy-Przycisk $panelB 'Włącz zaporę' $false
+$btnBSmb        = Nowy-Przycisk $panelB 'Wyłącz SMBv1' $false
+$btnBUpdate     = Nowy-Przycisk $panelB 'Windows Update' $false
 
-$tabBezp = Nowa-Zakladka 'Bezpieczeństwo' $siatkaB ('Przegląd zabezpieczeń komputera. Zielone = OK, pomarańczowe = warto poprawić, czerwone = do naprawy. ' +
-    '"Zapisz raport na pulpit" tworzy plik z wynikami i listą wykonanych prac - możesz go dać klientowi.') $panelB
+$tabBezp = Nowa-Zakladka 'Bezpieczeństwo' $siatkaB ('Przegląd zabezpieczeń komputera. Zielone = OK, pomarańczowe = warto poprawić, czerwone = do naprawy, niebieskie = informacja. ' +
+    '"Zapisz raport na pulpit" tworzy plik z wynikami i listą wykonanych prac - możesz go zostawić klientowi.') $panelB
 
 $form.Controls.Add($zakladki)
 $form.Controls.Add($logBox)
+$form.Controls.Add($statusBar)
+$form.Controls.Add($baner)
+
+# =====================================================================
+#  LOGIKA: WSPOLNE
+# =====================================================================
+function Posortuj-Ponownie($siatka) {
+    $kolumna = $siatka.SortedColumn
+    if (-not $kolumna) { return }
+    $kierunek = [System.ComponentModel.ListSortDirection]::Ascending
+    if ([string]$siatka.SortOrder -eq 'Descending') { $kierunek = [System.ComponentModel.ListSortDirection]::Descending }
+    $siatka.Sort($kolumna, $kierunek)
+}
 
 # =====================================================================
 #  LOGIKA: USLUGI
@@ -810,18 +1026,21 @@ function Wypelnij-Uslugi {
         $si = Get-StartInfo $u.Nazwa
         if (-not $si) { continue }
         $wylaczona = ($si.Start -eq 4)
-        $zaznacz = (($u.Rodzaj -eq 'Zalecane') -and (-not $wylaczona))
-        $idx = $siatkaU.Rows.Add($zaznacz, ($u.Etykieta + $NL + $u.Nazwa), $u.Kategoria, $u.Opis, $u.Rodzaj,
+        $idx = $siatkaU.Rows.Add($false, ($u.Etykieta + $NL + $u.Nazwa), $u.Kategoria, $u.Opis, $u.Rodzaj,
             (Stan-PL $svc.Status), (Opis-Startu $si.Start $si.Delayed))
         $wiersz = $siatkaU.Rows[$idx]
         $wiersz.Tag = $u
         if ($u.Rodzaj -eq 'Zalecane') { $wiersz.Cells[4].Style.ForeColor = Kolor 'OK' }
         else { $wiersz.Cells[4].Style.ForeColor = Kolor 'UWAGA' }
+        $wiersz.Cells[4].Style.Font = $czcionkaGruba
+        if ($svc.Status -eq 'Running') { $wiersz.Cells[5].Style.ForeColor = Kolor 'OK' }
         if ($wylaczona) {
+            $wiersz.Cells[1].Style.ForeColor = Kolor 'Wyłączony'
             $wiersz.Cells[5].Style.ForeColor = Kolor 'Wyłączony'
             $wiersz.Cells[6].Style.ForeColor = Kolor 'Wyłączony'
         }
     }
+    Posortuj-Ponownie $siatkaU
     Filtruj-Uslugi
 }
 
@@ -834,15 +1053,26 @@ function Filtruj-Uslugi {
         $tekst = $u.Etykieta + ' ' + $u.Nazwa + ' ' + $u.Kategoria + ' ' + $u.Opis
         $r.Visible = ($tekst.IndexOf($fraza, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     }
+    Aktualizuj-Status
 }
 
 $txtSzukaj.Add_TextChanged({ Filtruj-Uslugi })
 
-$btnZalecane.Add_Click({
+$btnPakiet.Add_Click({
+    $nazwaPakietu = [string]$cmbPakiet.SelectedItem
+    $lista = @($pakiety[$nazwaPakietu])
+    $wszystkieZalecane = ($lista -contains '*ZALECANE*')
+    $licznik = 0
     foreach ($r in $siatkaU.Rows) {
-        $si = Get-StartInfo $r.Tag.Nazwa
-        $r.Cells[0].Value = (($r.Tag.Rodzaj -eq 'Zalecane') -and ($si.Start -ne 4))
+        $u = $r.Tag
+        $pasuje = ($lista -contains $u.Nazwa) -or ($wszystkieZalecane -and $u.Rodzaj -eq 'Zalecane')
+        if ($pasuje -and ((Get-StartInfo $u.Nazwa).Start -ne 4)) {
+            $r.Cells[0].Value = $true
+            $licznik++
+        }
     }
+    Log ('Pakiet "' + $nazwaPakietu + '": zaznaczono ' + $licznik + ' usług(i) (już wyłączone pominięto). Sprawdź listę i kliknij "Zastosuj do zaznaczonych".')
+    Aktualizuj-Status
 })
 
 $btnOdznaczU.Add_Click({ Odznacz-Wszystko $siatkaU })
@@ -854,10 +1084,11 @@ $btnZastosuj.Add_Click({
     else { $typ = 'disabled'; $kod = 4; $nazwaTrybu = 'Wyłączony' }
 
     $wybrane = @(Zaznaczone $siatkaU | Where-Object { (Get-StartInfo $_.Nazwa).Start -ne $kod })
-    if ($wybrane.Count -eq 0) { Info "Brak zaznaczonych usług do zmiany na: $nazwaTrybu."; return }
+    if ($wybrane.Count -eq 0) { Info ('Brak zaznaczonych usług do zmiany na: ' + $nazwaTrybu + '.'); return }
+    if (-not (Wymaga-Admina)) { return }
 
     $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Etykieta }) -join $NL
-    if (-not (Pytanie ("Ustawić $($wybrane.Count) usług(i) na: ${nazwaTrybu}?" + $NL + $NL + $nazwy))) { return }
+    if (-not (Pytanie ('Ustawić ' + $wybrane.Count + ' usług(i) na: ' + $nazwaTrybu + '?' + $NL + $NL + $nazwy))) { return }
 
     Zajety $true
     try {
@@ -876,7 +1107,7 @@ $btnZastosuj.Add_Click({
         })
         $plikKopii = Join-Path $folderKopii ('uslugi_{0:yyyyMMdd_HHmmss}.csv' -f (Get-Date))
         $dane | Export-Csv -LiteralPath $plikKopii -NoTypeInformation -Encoding UTF8
-        Log "Kopia ustawień: $plikKopii"
+        Log ('Kopia ustawień: ' + $plikKopii)
 
         $ok = 0; $bledy = 0
         foreach ($d in $dane) {
@@ -885,14 +1116,14 @@ $btnZastosuj.Add_Click({
                 if ($typ -eq 'disabled' -and $d.Stan -eq 'Running') {
                     Stop-Service -Name $d.Nazwa -Force -ErrorAction SilentlyContinue
                 }
-                Log "Usługa ustawiona na $($nazwaTrybu): $($d.Nazwa)"
+                Log ('Usługa ustawiona na ' + $nazwaTrybu + ': ' + $d.Nazwa)
                 $ok++
             } else {
-                Log "BŁĄD: $($d.Nazwa): $($w.Komunikat)"
+                Log ('BŁĄD: ' + $d.Nazwa + ': ' + $w.Komunikat)
                 $bledy++
             }
         }
-        Log "Gotowe. Zmieniono: $ok, błędy: $bledy. Zalecany restart komputera."
+        Log ('Gotowe. Zmieniono: ' + $ok + ', błędy: ' + $bledy + '. Zalecany restart komputera.')
     } finally {
         Zajety $false
         Wypelnij-Uslugi
@@ -902,7 +1133,8 @@ $btnZastosuj.Add_Click({
 $btnDomyslne.Add_Click({
     $wybrane = @(Zaznaczone $siatkaU)
     if ($wybrane.Count -eq 0) { Info 'Zaznacz usługi, którym przywrócić domyślne ustawienia Windows.'; return }
-    if (-not (Pytanie "Przywrócić domyślne ustawienia Windows dla $($wybrane.Count) usług(i)?")) { return }
+    if (-not (Wymaga-Admina)) { return }
+    if (-not (Pytanie ('Przywrócić domyślne ustawienia Windows dla ' + $wybrane.Count + ' usług(i)?'))) { return }
     Zajety $true
     try {
         foreach ($u in $wybrane) {
@@ -911,9 +1143,9 @@ $btnDomyslne.Add_Click({
                 if ($u.Domyslnie -eq 'auto' -or $u.Domyslnie -eq 'delayed-auto') {
                     Start-Service -Name $u.Nazwa -ErrorAction SilentlyContinue
                 }
-                Log "Przywrócono domyślne ($($u.Domyslnie)): $($u.Nazwa)"
+                Log ('Przywrócono domyślne (' + $u.Domyslnie + '): ' + $u.Nazwa)
             } else {
-                Log "BŁĄD: $($u.Nazwa): $($w.Komunikat)"
+                Log ('BŁĄD: ' + $u.Nazwa + ': ' + $w.Komunikat)
             }
         }
         Log 'Gotowe.'
@@ -924,6 +1156,7 @@ $btnDomyslne.Add_Click({
 })
 
 $btnKopia.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     $okno = New-Object System.Windows.Forms.OpenFileDialog
     $okno.InitialDirectory = $folderKopii
     $okno.Filter = 'Kopie usług (uslugi_*.csv)|uslugi_*.csv|Wszystkie pliki (*.*)|*.*'
@@ -938,9 +1171,9 @@ $btnKopia.Add_Click({
             $w = Ustaw-Start $r.Nazwa $typ
             if ($w.Ok) {
                 if ($r.Stan -eq 'Running') { Start-Service -Name $r.Nazwa -ErrorAction SilentlyContinue }
-                Log "Przywrócono ($typ): $($r.Nazwa)"
+                Log ('Przywrócono (' + $typ + '): ' + $r.Nazwa)
             } else {
-                Log "BŁĄD: $($r.Nazwa): $($w.Komunikat)"
+                Log ('BŁĄD: ' + $r.Nazwa + ': ' + $w.Komunikat)
             }
         }
         Log 'Przywracanie z kopii zakończone. Zalecany restart komputera.'
@@ -960,27 +1193,32 @@ function Wypelnij-Autostart {
         $idx = $siatkaA.Rows.Add($false, $el.Nazwa, $el.Polecenie, $el.Miejsce, $stanTxt)
         $wiersz = $siatkaA.Rows[$idx]
         $wiersz.Tag = $el
+        $wiersz.Cells[4].Style.Font = $czcionkaGruba
         if ($el.Wylaczony) {
-            $wiersz.Cells[4].Style.ForeColor = Kolor 'Wyłączony'
             $wiersz.Cells[1].Style.ForeColor = Kolor 'Wyłączony'
+            $wiersz.Cells[2].Style.ForeColor = Kolor 'Wyłączony'
+            $wiersz.Cells[4].Style.ForeColor = Kolor 'Wyłączony'
         } else {
             $wiersz.Cells[4].Style.ForeColor = Kolor 'OK'
         }
     }
+    Posortuj-Ponownie $siatkaA
+    Aktualizuj-Status
 }
 
 function Zmien-Autostart([bool]$wlacz) {
     $wybrane = @(Zaznaczone $siatkaA | Where-Object { $_.Wylaczony -eq $wlacz })
     if ($wlacz) { $slowo = 'Włączyć' } else { $slowo = 'Wyłączyć' }
     if ($wybrane.Count -eq 0) { Info 'Brak zaznaczonych pozycji do zmiany.'; return }
+    if (-not (Wymaga-Admina)) { return }
     $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Nazwa }) -join $NL
-    if (-not (Pytanie ("$slowo w autostarcie?" + $NL + $NL + $nazwy))) { return }
+    if (-not (Pytanie ($slowo + ' w autostarcie?' + $NL + $NL + $nazwy))) { return }
     foreach ($el in $wybrane) {
         try {
             Ustaw-Autostart $el $wlacz
-            if ($wlacz) { Log "Autostart włączony: $($el.Nazwa)" } else { Log "Autostart wyłączony: $($el.Nazwa)" }
+            if ($wlacz) { Log ('Autostart włączony: ' + $el.Nazwa) } else { Log ('Autostart wyłączony: ' + $el.Nazwa) }
         } catch {
-            Log "BŁĄD autostart $($el.Nazwa): $($_.Exception.Message)"
+            Log ('BŁĄD autostart ' + $el.Nazwa + ': ' + $_.Exception.Message)
         }
     }
     Wypelnij-Autostart
@@ -988,6 +1226,7 @@ function Zmien-Autostart([bool]$wlacz) {
 
 $btnAWylacz.Add_Click({ Zmien-Autostart $false })
 $btnAWlacz.Add_Click({ Zmien-Autostart $true })
+$btnAOdznacz.Add_Click({ Odznacz-Wszystko $siatkaA })
 $btnAOdswiez.Add_Click({ Wypelnij-Autostart })
 $btnAMenedzer.Add_Click({ Start-Process -FilePath 'taskmgr.exe' -ArgumentList '/7 /startup' })
 
@@ -1003,27 +1242,34 @@ function Wypelnij-Programy {
         $idx = $siatkaP.Rows.Add($false, $p.Nazwa, $opis, [string]$p.Liczba, (Tekst-Rozmiaru $p.Pamiec), $oknoTxt)
         $wiersz = $siatkaP.Rows[$idx]
         $wiersz.Tag = $p
+        $wiersz.Cells[2].Style.ForeColor = $kolorSzary
+        $wiersz.Cells[4].Style.Font = $czcionkaGruba
         if (-not $p.Okno) { $wiersz.Cells[5].Style.ForeColor = Kolor 'UWAGA' }
     }
+    Posortuj-Ponownie $siatkaP
     if (Czy-TloZablokowane) { Log 'Aplikacje ze Sklepu: działanie w tle ZABLOKOWANE.' }
+    Aktualizuj-Status
 }
 
 $btnPOdswiez.Add_Click({ Wypelnij-Programy })
+$btnPOdznacz.Add_Click({ Odznacz-Wszystko $siatkaP })
 
 $btnPZakoncz.Add_Click({
     $wybrane = @(Zaznaczone $siatkaP)
     if ($wybrane.Count -eq 0) { Info 'Zaznacz programy do zamknięcia.'; return }
+    if (-not (Wymaga-Admina)) { return }
     $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Nazwa }) -join $NL
     if (-not (Pytanie ('Zamknąć? Niezapisana praca w tych programach przepadnie.' + $NL + $NL + $nazwy))) { return }
     foreach ($p in $wybrane) {
         Stop-Process -Name $p.Nazwa -Force -ErrorAction SilentlyContinue
-        Log "Zamknięto: $($p.Nazwa)"
+        Log ('Zamknięto: ' + $p.Nazwa)
     }
     Start-Sleep -Milliseconds 500
     Wypelnij-Programy
 })
 
 $btnPBlokuj.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     if (-not (Pytanie ('Zablokować działanie w tle aplikacjom ze Sklepu Microsoft (Poczta, Pogoda, Xbox itp.)?' + $NL +
         'Mogą przestać przychodzić od nich powiadomienia. Zwykłych programów to nie dotyczy.'))) { return }
     try {
@@ -1034,6 +1280,7 @@ $btnPBlokuj.Add_Click({
 })
 
 $btnPOdblokuj.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     try {
         if (Test-Path -LiteralPath $kluczPolityki) {
             Remove-ItemProperty -LiteralPath $kluczPolityki -Name 'LetAppsRunInBackground' -ErrorAction SilentlyContinue
@@ -1048,22 +1295,35 @@ $btnPOdblokuj.Add_Click({
 function Wypelnij-Czyszczenie {
     $siatkaC.Rows.Clear()
     foreach ($p in $listaCzyszczenia) {
-        $idx = $siatkaC.Rows.Add([bool]$p.Zaznacz, $p.Etykieta, $p.Opis, '...')
-        $siatkaC.Rows[$idx].Tag = $p
+        $p | Add-Member -NotePropertyName 'Bajty' -NotePropertyValue ([long]-1) -Force
+        $idx = $siatkaC.Rows.Add($false, $p.Etykieta, $p.Opis, '...')
+        $wiersz = $siatkaC.Rows[$idx]
+        $wiersz.Tag = $p
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        $wiersz.Cells[2].Style.ForeColor = $kolorSzary
     }
+    Aktualizuj-Status
 }
 
 function Przelicz-Rozmiary {
     $suma = [long]0
     foreach ($r in $siatkaC.Rows) {
         $p = $r.Tag
-        if (@($p.Sciezki).Count -eq 0) { $r.Cells[3].Value = 'nieznany'; continue }
+        if (@($p.Sciezki).Count -eq 0) {
+            $p.Bajty = [long]-1
+            $r.Cells[3].Value = 'nieznany'
+            continue
+        }
         $r.Cells[3].Value = 'liczę...'
         [System.Windows.Forms.Application]::DoEvents()
         $b = Rozmiar-Sciezek $p.Sciezki
+        $p.Bajty = [long]$b
         $r.Cells[3].Value = Tekst-Rozmiaru $b
+        if ($b -ge 500MB) { $r.Cells[3].Style.ForeColor = Kolor 'UWAGA'; $r.Cells[3].Style.Font = $czcionkaGruba }
+        else { $r.Cells[3].Style.ForeColor = $kolorTekst; $r.Cells[3].Style.Font = $czcionka }
         $suma += $b
     }
+    Posortuj-Ponownie $siatkaC
     Log ('Czyszczenie - do odzyskania łącznie: ' + (Tekst-Rozmiaru $suma))
 }
 
@@ -1072,11 +1332,17 @@ $btnPrzelicz.Add_Click({
     try { Przelicz-Rozmiary } finally { Zajety $false }
 })
 
+$btnCBezpieczne.Add_Click({
+    foreach ($r in $siatkaC.Rows) { $r.Cells[0].Value = [bool]$r.Tag.Zaznacz }
+    Aktualizuj-Status
+})
+
 $btnOdznaczC.Add_Click({ Odznacz-Wszystko $siatkaC })
 
 $btnWyczysc.Add_Click({
     $wybrane = @(Zaznaczone $siatkaC)
     if ($wybrane.Count -eq 0) { Info 'Zaznacz, co wyczyścić.'; return }
+    if (-not (Wymaga-Admina)) { return }
     $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Etykieta }) -join $NL
     if (-not (Pytanie ('Wyczyścić?' + $NL + $NL + $nazwy))) { return }
 
@@ -1113,16 +1379,22 @@ $btnWyczysc.Add_Click({
 function Wypelnij-Bezpieczenstwo {
     $siatkaB.Rows.Clear()
     Log 'Sprawdzam zabezpieczenia...'
-    $wyniki = @(Sprawdz-Bezpieczenstwo)
+    $wyniki = @(Sprawdz-Bezpieczenstwo | Sort-Object -Property Waga)
     $stan.Bezpieczenstwo = $wyniki
     foreach ($w in $wyniki) {
         $idx = $siatkaB.Rows.Add($w.Nazwa, $w.Wynik, $w.Ocena, $w.Rada)
-        $siatkaB.Rows[$idx].Cells[2].Style.ForeColor = Kolor $w.Ocena
-        $siatkaB.Rows[$idx].Cells[2].Style.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
+        $wiersz = $siatkaB.Rows[$idx]
+        $wiersz.Tag = $w
+        $wiersz.Cells[0].Style.Font = $czcionkaGruba
+        $wiersz.Cells[2].Style.ForeColor = Kolor $w.Ocena
+        $wiersz.Cells[2].Style.Font = $czcionkaGruba
+        $wiersz.Cells[3].Style.ForeColor = $kolorSzary
     }
+    Posortuj-Ponownie $siatkaB
     $zle = @($wyniki | Where-Object { $_.Ocena -eq 'ŹLE' }).Count
     $uwagi = @($wyniki | Where-Object { $_.Ocena -eq 'UWAGA' }).Count
-    Log "Bezpieczeństwo: do naprawy $zle, do poprawy $uwagi."
+    Log ('Bezpieczeństwo: do naprawy ' + $zle + ', do poprawy ' + $uwagi + '.')
+    Aktualizuj-Status
 }
 
 $btnBOdswiez.Add_Click({
@@ -1131,6 +1403,7 @@ $btnBOdswiez.Add_Click({
 })
 
 $btnBAktualizuj.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     Zajety $true
     try {
         Log 'Aktualizuję bazy Microsoft Defender...'
@@ -1145,6 +1418,7 @@ $btnBAktualizuj.Add_Click({
 })
 
 $btnBSkan.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     $mpcmd = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
     if (-not (Test-Path -LiteralPath $mpcmd)) { Info 'Nie znaleziono Microsoft Defendera na tym komputerze.'; return }
     Zajety $true
@@ -1163,6 +1437,7 @@ $btnBSkan.Add_Click({
 })
 
 $btnBZapora.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     try {
         Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True -ErrorAction Stop
         Log 'Zapora Windows włączona dla wszystkich profili.'
@@ -1171,6 +1446,7 @@ $btnBZapora.Add_Click({
 })
 
 $btnBSmb.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
     try {
         Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
         Log 'SMBv1 wyłączony.'
@@ -1182,12 +1458,11 @@ $btnBUpdate.Add_Click({ Start-Process 'ms-settings:windowsupdate' })
 
 $btnBRaport.Add_Click({
     if (@($stan.Bezpieczenstwo).Count -eq 0) { Wypelnij-Bezpieczenstwo }
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
     $linie = New-Object System.Collections.ArrayList
     [void]$linie.Add('RAPORT SERWISOWY')
     [void]$linie.Add('Komputer: ' + $env:COMPUTERNAME)
     [void]$linie.Add('Data: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
-    if ($os) { [void]$linie.Add('System: ' + $os.Caption + ' (kompilacja ' + $os.BuildNumber + ')') }
+    if ($infoOS) { [void]$linie.Add('System: ' + $infoOS) }
     [void]$linie.Add('')
     [void]$linie.Add('ZABEZPIECZENIA')
     foreach ($w in $stan.Bezpieczenstwo) {
@@ -1201,7 +1476,7 @@ $btnBRaport.Add_Click({
     $pulpit = [Environment]::GetFolderPath('Desktop')
     $plik = Join-Path $pulpit ('Raport_serwisowy_{0}_{1:yyyyMMdd_HHmm}.txt' -f $env:COMPUTERNAME, (Get-Date))
     $linie | Out-File -FilePath $plik -Encoding UTF8
-    Log "Raport zapisany: $plik"
+    Log ('Raport zapisany: ' + $plik)
     Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$plik`""
 })
 
@@ -1210,27 +1485,33 @@ $btnBRaport.Add_Click({
 # =====================================================================
 $zakladki.Add_SelectedIndexChanged({
     $t = $zakladki.SelectedTab
-    if ($stan.Zaladowane.ContainsKey($t.Text)) { return }
-    $stan.Zaladowane[$t.Text] = $true
-    Zajety $true
-    try {
-        if ($t -eq $tabAutostart) { Wypelnij-Autostart }
-        elseif ($t -eq $tabProgramy) { Wypelnij-Programy }
-        elseif ($t -eq $tabCzyszczenie) { Wypelnij-Czyszczenie; Przelicz-Rozmiary }
-        elseif ($t -eq $tabBezp) { Wypelnij-Bezpieczenstwo }
-    } finally {
-        Zajety $false
+    if (-not $stan.Zaladowane.ContainsKey($t.Text)) {
+        $stan.Zaladowane[$t.Text] = $true
+        Zajety $true
+        try {
+            if ($t -eq $tabAutostart) { Wypelnij-Autostart }
+            elseif ($t -eq $tabProgramy) { Wypelnij-Programy }
+            elseif ($t -eq $tabCzyszczenie) { Wypelnij-Czyszczenie; Przelicz-Rozmiary }
+            elseif ($t -eq $tabBezp) { Wypelnij-Bezpieczenstwo }
+        } finally {
+            Zajety $false
+        }
     }
+    Aktualizuj-Status
 })
 
 $form.Add_Shown({
     $stan.Zaladowane[$tabUslugi.Text] = $true
-    Log "Komputer: $env:COMPUTERNAME. Kopie i log: $folderKopii"
+    Log ('Narzędzia serwisowe ' + $WersjaNarzedzia + '. Komputer: ' + $env:COMPUTERNAME + '. Kopie i log: ' + $folderKopii)
+    if (-not $czyAdmin) { Log 'TRYB PODGLĄDU: brak uprawnień administratora, zmiany są wyłączone.' }
     Wypelnij-Uslugi
+    $form.Activate()
 })
 
 try {
     [void]$form.ShowDialog()
 } catch {
     [void][System.Windows.Forms.MessageBox]::Show('Błąd: ' + $_.Exception.Message, 'Błąd', 'OK', 'Error')
+} finally {
+    $form.Dispose()
 }
