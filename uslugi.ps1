@@ -14,19 +14,21 @@
       Naprawy            - DISM, SFC, reset Windows Update, sieci, kolejki drukarki, ikon, zegara, sprawdzenie dysku
       Instalacja         - programy przez winget (oficjalne repozytorium Microsoft) i aktualizacja wszystkich
       Sprzet             - dysk (SMART, zuzycie), RAM i wolne sloty, bateria, sterowniki, klucz Windows, czas startu
+      Sterowniki i BIOS  - zainstalowane sterowniki, aktualizacje z Windows Update (tez firmware), narzedzie producenta
       Bezpieczenstwo     - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta
       Przed reinstalacja - kopia sterownikow, lista programow, klucz, zakladki przegladarek i dane uzytkownika
     Na gorze: Serwis ekspresowy, Raport dla klienta (HTML/PDF), Pomoc zdalna.
+    Sterowniki: aktualizacje z Windows Update, wybor dowolnej wersji z katalogu Microsoft Update, narzedzie producenta (BIOS).
 
     Kliknij naglowek kolumny, zeby posortowac. Nic nie jest zaznaczone na starcie.
     Programy pobiera tylko zakladka Instalacja, i to dopiero po kliknieciu. Kopie i log: C:\ProgramData\UslugiKopia
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.1'
+$WersjaNarzedzia = '4.2'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
-$NazwaSerwisu   = 'Serwis Komputerów Legnica'
+$NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
 $TelefonSerwisu = ''    # numer pokazywany klientowi, np. '600 100 200'
 $LinkOpinii     = ''    # link "Poproś o opinie" z wizytówki Google
 $QrOpinii       = ''    # kod QR (SVG) z linku do opinii
@@ -65,7 +67,7 @@ try {
 } catch { $win32 = $null }
 if ($win32) {
     try { [void]$win32::SetProcessDPIAware() } catch { }
-    try { [void]$win32::SetCurrentProcessExplicitAppUserModelID('SerwisKomputerowLegnica.NarzedziaSerwisowe') } catch { }
+    try { [void]$win32::SetCurrentProcessExplicitAppUserModelID('NarzedziaSerwisowe.Okno') } catch { }
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -2046,6 +2048,409 @@ function Ustal-KontoKlienta {
 }
 
 # =====================================================================
+#  STEROWNIKI I BIOS
+# =====================================================================
+# klasa urzadzenia -> rodzaj, waznosc, waga do sortowania
+$klasySterownikow = @{
+    'DISPLAY'           = @('Karta graficzna', 'Ważne', 0)
+    'NET'               = @('Sieć (Wi-Fi, LAN)', 'Ważne', 0)
+    'MEDIA'             = @('Dźwięk', 'Ważne', 0)
+    'BLUETOOTH'         = @('Bluetooth', 'Ważne', 0)
+    'HDC'               = @('Kontroler dysków', 'Ważne', 0)
+    'SCSIADAPTER'       = @('Kontroler dysków', 'Ważne', 0)
+    'FIRMWARE'          = @('BIOS / firmware', 'BIOS i firmware', 1)
+    'SYSTEM'            = @('Chipset i system', 'Mniej ważne', 2)
+    'USB'               = @('USB', 'Mniej ważne', 2)
+    'CAMERA'            = @('Kamera', 'Mniej ważne', 2)
+    'IMAGE'             = @('Kamera / skaner', 'Mniej ważne', 2)
+    'BIOMETRIC'         = @('Czytnik linii papilarnych', 'Mniej ważne', 2)
+    'HIDCLASS'          = @('Klawiatura, touchpad, pióro', 'Mniej ważne', 2)
+    'MOUSE'             = @('Mysz, touchpad', 'Mniej ważne', 2)
+    'KEYBOARD'          = @('Klawiatura', 'Mniej ważne', 2)
+    'SENSOR'            = @('Czujniki', 'Mniej ważne', 2)
+    'BATTERY'           = @('Bateria i zasilanie', 'Mniej ważne', 2)
+    'SOFTWARECOMPONENT' = @('Dodatki producenta', 'Mniej ważne', 2)
+    'EXTENSION'         = @('Rozszerzenia sterowników', 'Mniej ważne', 2)
+    'PRINTER'           = @('Drukarka', 'Mniej ważne', 2)
+    'MONITOR'           = @('Monitor', 'Mniej ważne', 2)
+}
+$klasyNaLiscie = @('DISPLAY', 'NET', 'MEDIA', 'BLUETOOTH', 'HDC', 'SCSIADAPTER', 'FIRMWARE', 'SYSTEM', 'CAMERA', 'IMAGE', 'BIOMETRIC', 'SENSOR')
+
+function Rodzaj-Sterownika([string]$klasa) {
+    $k = ([string]$klasa).ToUpper()
+    if ($klasySterownikow.ContainsKey($k)) { return $klasySterownikow[$k] }
+    @(('Inne (' + $klasa + ')'), 'Mniej ważne', 2)
+}
+
+function Pasuje-Sprzet([string]$a, [string]$b) {
+    if (-not $a -or -not $b) { return $false }
+    $a = $a.ToUpper(); $b = $b.ToUpper()
+    $a.StartsWith($b) -or $b.StartsWith($a)
+}
+
+function Nowy-Sterownik($nazwa, $klasa, $wersja, $data, $producent, $sprzet, $urzadzenie) {
+    $r = Rodzaj-Sterownika $klasa
+    [pscustomobject]@{ Nazwa = $nazwa; Rodzaj = $r[0]; Waznosc = $r[1]; Waga = $r[2]; Wersja = $wersja; Data = $data
+        Producent = $producent; Sprzet = $sprzet; Urzadzenie = $urzadzenie; Aktualizacja = $null }
+}
+
+function Pobierz-Sterowniki {
+    $wynik = New-Object System.Collections.ArrayList
+    # BIOS / UEFI zawsze na gorze
+    try {
+        $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $data = $null
+        if ($bios.ReleaseDate) { $data = $bios.ReleaseDate }
+        $b = Nowy-Sterownik ('BIOS / UEFI: ' + ([string]$cs.Manufacturer).Trim() + ' ' + ([string]$cs.Model).Trim()) 'FIRMWARE' ([string]$bios.SMBIOSBIOSVersion) $data ([string]$bios.Manufacturer) '' ''
+        $b.Waga = 0.5
+        [void]$wynik.Add($b)
+    } catch { }
+    $sterowniki = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {
+        $_.DeviceName -and $_.DeviceClass -and ($klasyNaLiscie -contains ([string]$_.DeviceClass).ToUpper()) -and
+        (([string]$_.DriverProviderName -ne 'Microsoft') -or ([string]$_.DeviceClass).ToUpper() -eq 'DISPLAY')
+    })
+    foreach ($g in @($sterowniki | Group-Object -Property DeviceName)) {
+        $s = $g.Group[0]
+        [void]$wynik.Add((Nowy-Sterownik ([string]$s.DeviceName) ([string]$s.DeviceClass) ([string]$s.DriverVersion) $s.DriverDate ([string]$s.DriverProviderName) ([string]$s.HardWareID) ([string]$s.DeviceID)))
+    }
+    $wynik
+}
+
+function Opis-Wersji($s) {
+    $t = [string]$s.Wersja
+    if ($s.Data) { try { $t = $t + ' (' + ([datetime]$s.Data).ToString('yyyy-MM-dd') + ')' } catch { } }
+    if ($s.Producent) { $t = $t + $NL + $s.Producent }
+    $t
+}
+
+# --- Windows Update: osobny proces PowerShella, zeby okno nie zawieszalo sie podczas szukania ---
+$skryptWUWspolny = @'
+function Szukaj-Sterownikow($sesja) {
+    $szukacz = $sesja.CreateUpdateSearcher()
+    $blad = ''
+    foreach ($serwer in @(2, 0)) {
+        try {
+            $szukacz.ServerSelection = $serwer
+            return $szukacz.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+        } catch { $blad = $_.Exception.Message }
+    }
+    throw $blad
+}
+'@
+
+$skryptWUSzukaj = 'param([string]$wyjscie)' + "`r`n" + $skryptWUWspolny + @'
+
+try {
+    $sesja = New-Object -ComObject Microsoft.Update.Session
+    $sesja.ClientApplicationID = 'Narzedzia serwisowe'
+    $wynik = Szukaj-Sterownikow $sesja
+    $lista = @(foreach ($u in $wynik.Updates) {
+        $data = ''
+        try { $data = ([datetime]$u.DriverVerDate).ToString('yyyy-MM-dd') } catch { }
+        [pscustomobject]@{ Id = [string]$u.Identity.UpdateID; Tytul = [string]$u.Title; Klasa = [string]$u.DriverClass
+            Producent = [string]$u.DriverManufacturer; Model = [string]$u.DriverModel; Data = $data
+            Sprzet = [string]$u.DriverHardwareID; Rozmiar = [long]$u.MaxDownloadSize }
+    })
+    ConvertTo-Json -InputObject @{ Ok = $true; Lista = $lista } -Depth 4 | Set-Content -LiteralPath $wyjscie -Encoding UTF8
+} catch {
+    ConvertTo-Json -InputObject @{ Ok = $false; Blad = $_.Exception.Message } | Set-Content -LiteralPath $wyjscie -Encoding UTF8
+}
+'@
+
+$skryptWUInstaluj = 'param([string]$plikIds, [string]$wyjscie)' + "`r`n" + $skryptWUWspolny + @'
+
+try {
+    $ids = @(Get-Content -LiteralPath $plikIds | Where-Object { $_ })
+    $sesja = New-Object -ComObject Microsoft.Update.Session
+    $sesja.ClientApplicationID = 'Narzedzia serwisowe'
+    $wynik = Szukaj-Sterownikow $sesja
+    $kolekcja = New-Object -ComObject Microsoft.Update.UpdateColl
+    foreach ($u in $wynik.Updates) {
+        if ($ids -contains [string]$u.Identity.UpdateID) {
+            if (-not $u.EulaAccepted) { $u.AcceptEula() }
+            [void]$kolekcja.Add($u)
+        }
+    }
+    if ($kolekcja.Count -eq 0) { throw 'Nie znaleziono wybranych aktualizacji (może są już zainstalowane).' }
+    $pobieranie = $sesja.CreateUpdateDownloader()
+    $pobieranie.Updates = $kolekcja
+    [void]$pobieranie.Download()
+    $instalator = $sesja.CreateUpdateInstaller()
+    $instalator.Updates = $kolekcja
+    $instalator.AllowSourcePrompts = $false
+    $w = $instalator.Install()
+    $wyniki = @(for ($i = 0; $i -lt $kolekcja.Count; $i++) {
+        [pscustomobject]@{ Id = [string]$kolekcja.Item($i).Identity.UpdateID; Tytul = [string]$kolekcja.Item($i).Title; Kod = [int]$w.GetUpdateResult($i).ResultCode }
+    })
+    ConvertTo-Json -InputObject @{ Ok = $true; Restart = [bool]$w.RebootRequired; Wyniki = $wyniki } -Depth 4 | Set-Content -LiteralPath $wyjscie -Encoding UTF8
+} catch {
+    ConvertTo-Json -InputObject @{ Ok = $false; Blad = $_.Exception.Message } | Set-Content -LiteralPath $wyjscie -Encoding UTF8
+}
+'@
+
+function Uruchom-SkryptWU([string]$skrypt, [string[]]$argumenty, [string]$opis) {
+    $plik = Join-Path $env:TEMP ('serwis_wu_' + [guid]::NewGuid().ToString('N') + '.ps1')
+    [IO.File]::WriteAllText($plik, $skrypt, (New-Object System.Text.UTF8Encoding($true)))
+    $wyjscie = $argumenty[-1]
+    $polecenie = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $plik + '"'
+    foreach ($a in $argumenty) { $polecenie = $polecenie + ' "' + $a + '"' }
+    [void](Uruchom-Program $polecenie $opis)
+    Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    $dane = $null
+    if (Test-Path -LiteralPath $wyjscie) {
+        try { $dane = Get-Content -LiteralPath $wyjscie -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+        Remove-Item -LiteralPath $wyjscie -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $dane) { $dane = [pscustomobject]@{ Ok = $false; Blad = 'brak odpowiedzi z Windows Update' } }
+    $dane
+}
+
+function Szukaj-AktualizacjiSterownikow {
+    $wyjscie = Join-Path $env:TEMP ('serwis_wu_' + [guid]::NewGuid().ToString('N') + '.json')
+    Uruchom-SkryptWU $skryptWUSzukaj @($wyjscie) 'szukanie sterowników w Windows Update'
+}
+
+function Zainstaluj-AktualizacjeSterownikow([string[]]$ids) {
+    $plikIds = Join-Path $env:TEMP ('serwis_wu_' + [guid]::NewGuid().ToString('N') + '.txt')
+    Set-Content -LiteralPath $plikIds -Value $ids -Encoding ASCII
+    $wyjscie = Join-Path $env:TEMP ('serwis_wu_' + [guid]::NewGuid().ToString('N') + '.json')
+    $wynik = Uruchom-SkryptWU $skryptWUInstaluj @($plikIds, $wyjscie) 'instalacja sterowników'
+    Remove-Item -LiteralPath $plikIds -Force -ErrorAction SilentlyContinue
+    $wynik
+}
+
+function Opis-WynikuWU([int]$kod) {
+    switch ($kod) {
+        2       { 'zainstalowano' }
+        3       { 'zainstalowano z ostrzeżeniami' }
+        4       { 'błąd instalacji' }
+        5       { 'przerwano' }
+        default { 'kod ' + $kod }
+    }
+}
+
+# --- narzedzia producentow (sprawdzaja tez BIOS) ---
+function Narzedzie-Producenta {
+    $producent = ''; $procesor = ''
+    try { $producent = [string](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).Manufacturer } catch { }
+    try { $procesor = [string](Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1).Manufacturer } catch { }
+    if ($producent -match 'Dell') { return [pscustomobject]@{ Etykieta = 'Dell Command | Update'; Id = 'Dell.CommandUpdate.Universal'; Skrot = '*Dell Command*Update*'; Strona = '' } }
+    if ($producent -match 'Lenovo') { return [pscustomobject]@{ Etykieta = 'Lenovo System Update'; Id = 'Lenovo.SystemUpdate'; Skrot = '*System Update*'; Strona = '' } }
+    if ($producent -match 'HP|Hewlett') { return [pscustomobject]@{ Etykieta = 'HP Support Assistant'; Id = 'HP.SupportAssistant'; Skrot = '*HP Support Assistant*'; Strona = '' } }
+    if ($procesor -match 'Intel') {
+        return [pscustomobject]@{ Etykieta = 'Intel Driver & Support Assistant'; Id = 'Intel.IntelDriverAndSupportAssistant'; Skrot = ''
+            Strona = 'https://www.intel.com/content/www/us/en/support/intel-driver-support-assistant.html' }
+    }
+    if ($procesor -match 'AMD') { return [pscustomobject]@{ Etykieta = 'Sterowniki AMD'; Id = ''; Skrot = ''; Strona = 'https://www.amd.com/en/support/download/drivers.html' } }
+    $null
+}
+
+function Znajdz-Skrot([string]$wzor) {
+    if (-not $wzor) { return $null }
+    $foldery = @((Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'))
+    if ($stan.Klient) { $foldery += (Join-Path $stan.Klient.Sciezka 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs') }
+    foreach ($f in $foldery) {
+        $s = Get-ChildItem -LiteralPath $f -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like $wzor } | Select-Object -First 1
+        if ($s) { return $s.FullName }
+    }
+    $null
+}
+
+function Strona-Producenta {
+    $cs = $null; $bios = $null
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop } catch { }
+    try { $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop } catch { }
+    $producent = ([string]$cs.Manufacturer).Trim()
+    $model = ([string]$cs.Model).Trim()
+    $sn = ([string]$bios.SerialNumber).Trim()
+    if ($producent -match 'Dell' -and $sn) {
+        return [pscustomobject]@{ Adres = ('https://www.dell.com/support/home/pl-pl/product-support/servicetag/' + $sn + '/drivers'); Numer = $sn }
+    }
+    $zapytanie = [uri]::EscapeDataString($producent + ' ' + $model + ' sterowniki BIOS')
+    [pscustomobject]@{ Adres = ('https://www.google.com/search?q=' + $zapytanie); Numer = $sn }
+}
+
+# =====================================================================
+#  WYBOR WERSJI: katalog Microsoft Update (wszystkie opublikowane wersje sterownika dla danego sprzetu)
+# =====================================================================
+function Uruchom-Exe([string]$plik, [string]$argumenty, [string]$opis) {
+    # bez cmd.exe (adresy z % nie sa wtedy psute); okno programu dalej reaguje
+    $start = Get-Date
+    $ostatni = Get-Date
+    $proc = Start-Process -FilePath $plik -ArgumentList $argumenty -WindowStyle Hidden -PassThru
+    $null = $proc.Handle
+    while (-not $proc.HasExited) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 200
+        if (((Get-Date) - $ostatni).TotalSeconds -ge 60) {
+            $ostatni = Get-Date
+            Log ('  ' + $opis + ': trwa (' + [int]((Get-Date) - $start).TotalMinutes + ' min)...')
+        }
+    }
+    $proc.WaitForExit()
+    $proc.ExitCode
+}
+
+function Pobierz-Plik([string]$adres, [string]$cel, [string]$plikPost, [string]$opis) {
+    $curl = Join-Path $env:windir 'System32\curl.exe'
+    if (Test-Path -LiteralPath $curl) {
+        $arg = '-s -L --fail --max-time 3600 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "' + $cel + '"'
+        if ($plikPost) { $arg = $arg + ' -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@' + $plikPost + '"' }
+        $arg = $arg + ' "' + $adres + '"'
+        $kod = Uruchom-Exe $curl $arg $opis
+        return (($kod -eq 0) -and (Test-Path -LiteralPath $cel))
+    }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        if ($plikPost) {
+            Invoke-WebRequest -Uri $adres -Method Post -Body ([IO.File]::ReadAllText($plikPost)) -ContentType 'application/x-www-form-urlencoded' -OutFile $cel -UseBasicParsing -ErrorAction Stop
+        } else {
+            Invoke-WebRequest -Uri $adres -OutFile $cel -UseBasicParsing -ErrorAction Stop
+        }
+        return (Test-Path -LiteralPath $cel)
+    } catch { return $false }
+}
+
+function Tekst-Komorki([string]$html) {
+    $t = [System.Net.WebUtility]::HtmlDecode(($html -replace '<[^>]+>', ' '))
+    ($t -replace '\s+', ' ').Trim()
+}
+
+function Parsuj-Katalog([string]$html) {
+    $wyniki = New-Object System.Collections.ArrayList
+    foreach ($m in [regex]::Matches($html, '<tr id="([0-9a-fA-F\-]{36})_R\d+"[\s\S]*?</tr>')) {
+        $id = $m.Groups[1].Value
+        $komorki = @{}
+        foreach ($c in [regex]::Matches($m.Value, '<td[^>]*id="' + [regex]::Escape($id) + '_C(\d)_R\d+"[^>]*>([\s\S]*?)</td>')) {
+            $komorki[[int]$c.Groups[1].Value] = $c.Groups[2].Value
+        }
+        if (-not $komorki.ContainsKey(1)) { continue }
+        $data = $null
+        try { $data = [datetime]::ParseExact((Tekst-Komorki $komorki[4]), 'M/d/yyyy', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+        $bajty = [long]0
+        $spany = [regex]::Matches([string]$komorki[6], '<span[^>]*>([^<]*)</span>')
+        if ($spany.Count -ge 2) { [void][long]::TryParse($spany[1].Groups[1].Value.Trim(), [ref]$bajty) }
+        [void]$wyniki.Add([pscustomobject]@{
+            Id = $id; Tytul = (Tekst-Komorki $komorki[1]); Produkty = (Tekst-Komorki $komorki[2]); Klasyfikacja = (Tekst-Komorki $komorki[3])
+            Data = $data; Wersja = (Tekst-Komorki $komorki[5]); Bajty = $bajty; Zrodlo = 'Katalog Microsoft'; Aktualizacja = $null
+        })
+    }
+    $wyniki
+}
+
+function Parsuj-LinkiPobierania([string]$html) {
+    $t = $html.Replace('www.download.windowsupdate', 'download.windowsupdate')
+    $wzor = "(https?://(?:dl\.delivery\.mp\.microsoft\.com|(?:catalog\.s\.)?download\.windowsupdate\.com)/[^'`"\s]*)"
+    @([regex]::Matches($t, $wzor) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+}
+
+function Zapytania-Katalogu([string]$sprzet) {
+    # od najdokladniejszego identyfikatora do ogolnego (producent + model ukladu)
+    $lista = New-Object System.Collections.ArrayList
+    if (-not $sprzet) { return @() }
+    [void]$lista.Add($sprzet)
+    if ($sprzet -match '^([^\\]+\\[^&]+&[^&]+)&') { [void]$lista.Add($Matches[1]) }
+    @($lista | Select-Object -Unique)
+}
+
+function Szukaj-WKatalogu([string]$sprzet) {
+    $wszystkie = New-Object System.Collections.ArrayList
+    foreach ($q in (Zapytania-Katalogu $sprzet)) {
+        $plik = Join-Path $env:TEMP ('serwis_kat_' + [guid]::NewGuid().ToString('N') + '.html')
+        $adres = 'https://www.catalog.update.microsoft.com/Search.aspx?q=' + [uri]::EscapeDataString($q)
+        if (Pobierz-Plik $adres $plik '' 'katalog Microsoft') {
+            $html = [IO.File]::ReadAllText($plik)
+            foreach ($w in (Parsuj-Katalog $html)) { if (-not @($wszystkie | Where-Object { $_.Id -eq $w.Id })) { [void]$wszystkie.Add($w) } }
+        }
+        Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    }
+    @($wszystkie | Sort-Object -Property Data -Descending)
+}
+
+function Identyfikatory-Urzadzenia([string]$urzadzenie, [string]$sprzet) {
+    $ids = @()
+    if ($urzadzenie) {
+        try {
+            $e = Get-CimInstance -ClassName Win32_PnPEntity -Filter ("DeviceID='" + $urzadzenie.Replace('\', '\\').Replace("'", "\'") + "'") -ErrorAction Stop | Select-Object -First 1
+            if ($e) { $ids = @($e.HardwareID) + @($e.CompatibleID) }
+        } catch { }
+    }
+    if ($sprzet -and $ids -notcontains $sprzet) { $ids = @($sprzet) + $ids }
+    @($ids | Where-Object { $_ })
+}
+
+$skryptWymusSterownik = @'
+param([string]$sprzet, [string]$inf, [string]$wyjscie)
+$ok = $false; $restart = $false; $blad = ''; $metoda = 'wybrana wersja (wymuszona)'
+if ($sprzet) {
+    try {
+        $definicja = '[DllImport("newdev.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwndParent, string HardwareId, string FullInfPath, uint InstallFlags, out bool bRebootRequired);'
+        Add-Type -Namespace 'SerwisSKL' -Name 'Sterownik' -MemberDefinition $definicja -ErrorAction Stop
+        $ok = [SerwisSKL.Sterownik]::UpdateDriverForPlugAndPlayDevices([IntPtr]::Zero, $sprzet, $inf, 1, [ref]$restart)
+        if (-not $ok) { $blad = 'kod Windows ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
+    } catch { $blad = $_.Exception.Message }
+}
+if (-not $ok) {
+    $metoda = 'pnputil'
+    $tekst = & pnputil.exe /add-driver $inf /install 2>&1
+    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) { $ok = $true; if ($LASTEXITCODE -eq 3010) { $restart = $true } }
+    else { $blad = $blad + ' / pnputil: ' + ((@($tekst) | Select-Object -Last 2) -join ' ') }
+}
+ConvertTo-Json -InputObject @{ Ok = $ok; Restart = $restart; Metoda = $metoda; Blad = $blad } | Set-Content -LiteralPath $wyjscie -Encoding UTF8
+'@
+
+function Zainstaluj-ZKatalogu($wersja, $sterownik) {
+    $folder = Join-Path $env:TEMP ('serwis_sterownik_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    try {
+        # 1. adres pliku z okna pobierania katalogu
+        $post = Join-Path $folder 'zapytanie.txt'
+        $json = '[{"size":0,"languages":"","uidInfo":"' + $wersja.Id + '","updateID":"' + $wersja.Id + '"}]'
+        [IO.File]::WriteAllText($post, ('updateIDs=' + [uri]::EscapeDataString($json)))
+        $okno = Join-Path $folder 'pobieranie.html'
+        if (-not (Pobierz-Plik 'https://www.catalog.update.microsoft.com/DownloadDialog.aspx' $okno $post 'katalog Microsoft')) { throw 'nie udało się połączyć z katalogiem Microsoft' }
+        $linki = @(Parsuj-LinkiPobierania ([IO.File]::ReadAllText($okno)))
+        if ($linki.Count -eq 0) { throw 'katalog nie podał adresu pliku' }
+        # 2. pobranie i rozpakowanie
+        $cab = Join-Path $folder 'sterownik.cab'
+        Log ('  pobieram ' + (Tekst-Rozmiaru $wersja.Bajty) + '...')
+        $adres = $linki[0]
+        if (-not (Pobierz-Plik ($adres -replace '^http:', 'https:') $cab '' 'pobieranie sterownika')) {
+            if (-not (Pobierz-Plik $adres $cab '' 'pobieranie sterownika')) { throw 'nie udało się pobrać pliku sterownika' }
+        }
+        $rozpakowane = Join-Path $folder 'pliki'
+        New-Item -ItemType Directory -Force -Path $rozpakowane | Out-Null
+        [void](Uruchom-Exe (Join-Path $env:windir 'System32\expand.exe') ('-F:* "' + $cab + '" "' + $rozpakowane + '"') 'rozpakowywanie')
+        $infy = @(Get-ChildItem -LiteralPath $rozpakowane -Recurse -Filter '*.inf' -ErrorAction SilentlyContinue)
+        if ($infy.Count -eq 0) { throw 'w pobranym pliku nie ma sterownika (.inf)' }
+        # 3. plik .inf, ktory obsluguje to urzadzenie, i identyfikator do wymuszenia wersji
+        $ids = Identyfikatory-Urzadzenia $sterownik.Urzadzenie $sterownik.Sprzet
+        $wybranyInf = $null; $wybranyId = ''
+        foreach ($i in $infy) {
+            $tresc = [IO.File]::ReadAllText($i.FullName)
+            foreach ($id in $ids) {
+                if ($tresc.IndexOf($id, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $wybranyInf = $i.FullName; $wybranyId = $id; break }
+            }
+            if ($wybranyInf) { break }
+        }
+        if (-not $wybranyInf) { $wybranyInf = $infy[0].FullName }
+        # 4. instalacja w osobnym procesie
+        $skrypt = Join-Path $folder 'instaluj.ps1'
+        [IO.File]::WriteAllText($skrypt, $skryptWymusSterownik, (New-Object System.Text.UTF8Encoding($true)))
+        $wyjscie = Join-Path $folder 'wynik.json'
+        $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $skrypt + '" "' + $wybranyId + '" "' + $wybranyInf + '" "' + $wyjscie + '"'
+        [void](Uruchom-Exe 'powershell.exe' $arg 'instalacja sterownika')
+        if (-not (Test-Path -LiteralPath $wyjscie)) { throw 'instalator nie zwrócił wyniku' }
+        Get-Content -LiteralPath $wyjscie -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        [pscustomobject]@{ Ok = $false; Restart = $false; Metoda = ''; Blad = $_.Exception.Message }
+    } finally {
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# =====================================================================
 #  RAPORT DLA KLIENTA (HTML, do wydruku albo zapisu jako PDF)
 # =====================================================================
 $naglowkiPrac = [ordered]@{
@@ -2056,6 +2461,7 @@ $naglowkiPrac = [ordered]@{
     'Ustawienia'     = 'Ustawienia Windows'
     'Czyszczenie'    = 'Czyszczenie dysku'
     'Naprawy'        = 'Naprawy systemu'
+    'Sterowniki'     = 'Zaktualizowane sterowniki i firmware'
     'Instalacja'     = 'Programy zainstalowane i zaktualizowane'
     'Bezpieczeństwo' = 'Zabezpieczenia'
     'Kopia'          = 'Kopia zapasowa przed reinstalacją'
@@ -2108,11 +2514,17 @@ li{margin:2px 0}
     Dodaj ('<!DOCTYPE html><html lang="pl"><head><meta charset="utf-8"><title>Raport serwisowy - ' + (Html $d.Komputer) + '</title><style>' + $css + '</style></head><body>')
     Dodaj '<button class="drukuj" onclick="window.print()">Drukuj / zapisz jako PDF</button><div class="strona">'
 
-    # naglowek
-    $nazwa = Html $d.NazwaSerwisu
-    $slowa = $nazwa.Split(' ')
-    if ($slowa.Count -gt 1) { $nazwa = ($slowa[0..($slowa.Count - 2)] -join ' ') + ' <span>' + $slowa[-1] + '</span>' }
-    Dodaj ('<div class="naglowek"><div><div class="marka">' + $nazwa + '</div><div class="podtytul">Raport z serwisu komputera &middot; ' + (Html $d.Data) + '</div></div>')
+    # naglowek (z nazwa firmy albo bez)
+    if ($d.NazwaSerwisu) {
+        $nazwa = Html $d.NazwaSerwisu
+        $slowa = $nazwa.Split(' ')
+        if ($slowa.Count -gt 1) { $nazwa = ($slowa[0..($slowa.Count - 2)] -join ' ') + ' <span>' + $slowa[-1] + '</span>' }
+        $podtytul = 'Raport z serwisu komputera &middot; ' + (Html $d.Data)
+    } else {
+        $nazwa = 'Raport <span>serwisowy</span>'
+        $podtytul = 'Komputer ' + (Html $d.Komputer) + ' &middot; ' + (Html $d.Data)
+    }
+    Dodaj ('<div class="naglowek"><div><div class="marka">' + $nazwa + '</div><div class="podtytul">' + $podtytul + '</div></div>')
     Dodaj '<div class="kontakt">'
     if ($d.Telefon) { Dodaj ('W razie pytań:<br><b>tel. ' + (Html $d.Telefon) + '</b>') }
     Dodaj '</div></div><div class="tresc">'
@@ -2183,7 +2595,8 @@ li{margin:2px 0}
     }
 
     Dodaj '</div><div class="stopka"><div>'
-    Dodaj ('<b>Dziękujemy za skorzystanie z usług ' + (Html $d.NazwaSerwisu) + '!</b><br>')
+    if ($d.NazwaSerwisu) { Dodaj ('<b>Dziękujemy za skorzystanie z usług ' + (Html $d.NazwaSerwisu) + '!</b><br>') }
+    else { Dodaj '<b>W razie pytań lub problemów z komputerem skontaktuj się z nami.</b><br>' }
     if ($d.Telefon) { Dodaj ('W razie problemów zadzwoń: <b>' + (Html $d.Telefon) + '</b><br>') }
     if ($d.LinkOpinii) {
         Dodaj ('Jeśli jesteś zadowolony, zostaw nam opinię w Google - bardzo nam pomaga.<br><a href="' + (Html $d.LinkOpinii) + '">' + (Html $d.LinkOpinii) + '</a>')
@@ -2243,7 +2656,8 @@ $wysokoscOkna = [math]::Min((Px 880), $obszar.Height - 10)
 $malyEkran = (($obszar.Height / $skala) -lt 820)
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Narzędzia serwisowe ' + $WersjaNarzedzia + ' - ' + $NazwaSerwisu
+$form.Text = 'Narzędzia serwisowe ' + $WersjaNarzedzia
+if ($NazwaSerwisu) { $form.Text = $form.Text + ' - ' + $NazwaSerwisu }
 $form.Size = New-Object System.Drawing.Size($szerokoscOkna, $wysokoscOkna)
 $form.MinimumSize = New-Object System.Drawing.Size([math]::Min((Px 980), $szerokoscOkna), [math]::Min((Px 600), $wysokoscOkna))
 $form.StartPosition = 'CenterScreen'
@@ -2276,7 +2690,8 @@ $banerTekst.BackColor = $kolorBaner
 $banerTekst.Padding = New-Object System.Windows.Forms.Padding((Px 8), (Px 10), (Px 8), 0)
 
 $banerTytul = New-Object System.Windows.Forms.Label
-$tekstTytulu = $NazwaSerwisu
+$tekstTytulu = 'Narzędzia serwisowe'
+if ($NazwaSerwisu) { $tekstTytulu = $NazwaSerwisu }
 if ($TelefonSerwisu) { $tekstTytulu = $tekstTytulu + '   ·   tel. ' + $TelefonSerwisu }
 $banerTytul.Text = $tekstTytulu
 $banerTytul.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13.5)
@@ -2288,7 +2703,7 @@ $banerTytul.AutoEllipsis = $true
 $banerInfo = New-Object System.Windows.Forms.Label
 $tekstUprawnien = 'administrator'
 if (-not $czyAdmin) { $tekstUprawnien = 'TRYB PODGLĄDU - zmiany wyłączone' }
-$tekstInfo = 'Narzędzia serwisowe ' + $WersjaNarzedzia + '   ·   ' + $env:COMPUTERNAME + '   ·   ' + $infoOS + '   ·   ' + $tekstUprawnien
+$tekstInfo = 'wersja ' + $WersjaNarzedzia + '   ·   ' + $env:COMPUTERNAME + '   ·   ' + $infoOS + '   ·   ' + $tekstUprawnien
 if ($stan.InneKonto) { $tekstInfo = $tekstInfo + '   ·   konto klienta: ' + $stan.Klient.Nazwa }
 $banerInfo.Text = $tekstInfo
 $banerInfo.ForeColor = $kolorMenuTekst
@@ -2527,6 +2942,29 @@ $btnSSterowniki  = Nowy-Przycisk $panelS 'Opcjonalne sterowniki' $false
 $tabSprzet = Nowa-Zakladka 'Sprzęt' $siatkaS ('Stan sprzętu: dyski (zdrowie, zużycie, temperatura), pamięć i wolne sloty, bateria, sterowniki, aktywacja i czas uruchamiania. ' +
     'Czerwone i pomarańczowe trafią jako zalecenia do raportu dla klienta.') $panelS
 
+# ---------- Sterowniki i BIOS ----------
+$siatkaD = Nowa-Siatka
+Dodaj-Kolumne $siatkaD 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaD 'Text' 'Urządzenie' 250 ''
+Dodaj-Kolumne $siatkaD 'Text' 'Rodzaj' 150 ''
+Dodaj-Kolumne $siatkaD 'Text' 'Ważność' 115 'Waga'
+Dodaj-Kolumne $siatkaD 'Text' 'Zainstalowany sterownik' 200 ''
+Dodaj-Kolumne $siatkaD 'Text' 'Dostępna aktualizacja' 0 ''
+
+$panelD = Nowy-PanelPrzyciskow
+$btnDSzukaj     = Nowy-Przycisk $panelD 'Sprawdź aktualizacje' $true
+$btnDInstaluj   = Nowy-Przycisk $panelD 'Zainstaluj zaznaczone' $false
+$btnDWersja     = Nowy-Przycisk $panelD 'Wybierz wersję...' $false
+$btnDWazne      = Nowy-Przycisk $panelD 'Zaznacz ważne' $false
+$btnDWszystkie  = Nowy-Przycisk $panelD 'Zaznacz wszystkie dostępne' $false
+$btnDOdznacz    = Nowy-Przycisk $panelD 'Odznacz wszystko' $false
+$btnDProducent  = Nowy-Przycisk $panelD 'Narzędzie producenta (BIOS)' $false
+$btnDStrona     = Nowy-Przycisk $panelD 'Strona producenta' $false
+$btnDUrzadzenia = Nowy-Przycisk $panelD 'Menedżer urządzeń' $false
+
+$tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update o nowsze sterowniki i firmware (u wielu producentów także BIOS). ' +
+    '"Wybierz wersję" (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft - także starsze. BIOS: "Narzędzie producenta" (Dell, Lenovo, HP, Intel).') $panelD
+
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
 Dodaj-Kolumne $siatkaB 'Text' 'Sprawdzenie' 210 ''
@@ -2645,7 +3083,8 @@ $menuStopka.Padding = New-Object System.Windows.Forms.Padding((Px 18), 0, (Px 8)
 $menuStopka.TextAlign = 'MiddleLeft'
 $menuStopka.ForeColor = [System.Drawing.Color]::FromArgb(107, 114, 128)
 $menuStopka.Font = New-Object System.Drawing.Font('Segoe UI', 8.25)
-$tekstStopki = $NazwaSerwisu
+$tekstStopki = 'Narzędzia serwisowe'
+if ($NazwaSerwisu) { $tekstStopki = $NazwaSerwisu }
 if ($TelefonSerwisu) { $tekstStopki = $tekstStopki + $NL + 'tel. ' + $TelefonSerwisu } else { $tekstStopki = $tekstStopki + $NL + 'wersja ' + $WersjaNarzedzia }
 $menuStopka.Text = $tekstStopki
 $menu.Controls.Add($menuStopka)
@@ -2663,6 +3102,7 @@ Nowa-PozycjaMenu 0xE90F 'Naprawy' $tabNaprawy
 Nowa-PozycjaMenu 0xE896 'Instalacja programów' $tabInstalacja
 Nowa-SekcjaMenu 'DIAGNOZA'
 Nowa-PozycjaMenu 0xE7F8 'Sprzęt' $tabSprzet
+Nowa-PozycjaMenu 0xE772 'Sterowniki i BIOS' $tabSterowniki
 Nowa-PozycjaMenu 0xEA18 'Bezpieczeństwo' $tabBezp
 Nowa-SekcjaMenu 'KOPIA'
 Nowa-PozycjaMenu 0xE74E 'Przed reinstalacją' $tabKopia
@@ -3636,6 +4076,358 @@ $btnKOtworz.Add_Click({
 })
 
 # =====================================================================
+#  LOGIKA: STEROWNIKI I BIOS
+# =====================================================================
+function Dodaj-WierszSterownika($s) {
+    $idx = $siatkaD.Rows.Add($false, $s.Nazwa, $s.Rodzaj, $s.Waznosc, (Opis-Wersji $s), '')
+    $wiersz = $siatkaD.Rows[$idx]
+    $wiersz.Tag = $s
+    $wiersz.Cells[1].Style.Font = $czcionkaGruba
+    if ($s.Waznosc -eq 'Ważne') { $wiersz.Cells[3].Style.ForeColor = Kolor 'OK' }
+    elseif ($s.Waznosc -eq 'BIOS i firmware') { $wiersz.Cells[3].Style.ForeColor = Kolor 'INFO' }
+    else { $wiersz.Cells[3].Style.ForeColor = $kolorSzary }
+    $wiersz.Cells[3].Style.Font = $czcionkaGruba
+    $wiersz.Cells[4].Style.ForeColor = $kolorSzary
+    $wiersz
+}
+
+function Wypelnij-Sterowniki {
+    $siatkaD.Rows.Clear()
+    Log 'Wczytuję zainstalowane sterowniki...'
+    $lista = @()
+    try { $lista = @(Pobierz-Sterowniki) } catch { Log ('Nie udało się odczytać sterowników: ' + $_.Exception.Message) }
+    foreach ($s in $lista) { [void](Dodaj-WierszSterownika $s) }
+    if ($siatkaD.SortedColumn) { Posortuj-Ponownie $siatkaD }
+    else { $siatkaD.Sort($siatkaD.Columns[3], [System.ComponentModel.ListSortDirection]::Ascending) }
+    Log ('Sterowników na liście: ' + $lista.Count + '. Kliknij "Sprawdź aktualizacje", żeby zapytać Windows Update.')
+    Aktualizuj-Status
+}
+
+function Pokaz-AktualizacjeSterownikow($lista) {
+    foreach ($r in $siatkaD.Rows) { $r.Tag.Aktualizacja = $null }
+    foreach ($u in $lista) {
+        $wiersz = $null
+        foreach ($r in $siatkaD.Rows) { if (Pasuje-Sprzet $r.Tag.Sprzet $u.Sprzet) { $wiersz = $r; break } }
+        if (-not $wiersz) {
+            $nazwa = [string]$u.Model
+            if (-not $nazwa) { $nazwa = [string]$u.Tytul }
+            $wiersz = Dodaj-WierszSterownika (Nowy-Sterownik $nazwa ([string]$u.Klasa) '' $null ([string]$u.Producent) ([string]$u.Sprzet) '')
+            $wiersz.Cells[4].Value = '(nie ma go na liście zainstalowanych)'
+        }
+        $wiersz.Tag.Aktualizacja = $u
+    }
+    $teraz = Get-Date
+    foreach ($r in $siatkaD.Rows) {
+        $s = $r.Tag
+        if ($s.Aktualizacja) {
+            $txt = 'NOWA: ' + $s.Aktualizacja.Tytul
+            if ($s.Aktualizacja.Data) { $txt = $txt + ' (' + $s.Aktualizacja.Data + ')' }
+            if ([long]$s.Aktualizacja.Rozmiar -gt 0) { $txt = $txt + ', ' + (Tekst-Rozmiaru ([long]$s.Aktualizacja.Rozmiar)) }
+            $r.Cells[5].Value = $txt
+            $r.Cells[5].Style.ForeColor = Kolor 'UWAGA'
+            $r.Cells[5].Style.Font = $czcionkaGruba
+        } else {
+            $stary = $false
+            if ($s.Data) { try { $stary = (($teraz - [datetime]$s.Data).TotalDays -gt 3 * 365) } catch { } }
+            if ($s.Waznosc -eq 'BIOS i firmware' -or $stary) {
+                $r.Cells[5].Value = 'brak w Windows Update - sprawdź narzędziem producenta'
+                $r.Cells[5].Style.ForeColor = Kolor 'INFO'
+            } else {
+                $r.Cells[5].Value = 'aktualny według Windows Update'
+                $r.Cells[5].Style.ForeColor = Kolor 'OK'
+            }
+            $r.Cells[5].Style.Font = $czcionka
+        }
+    }
+    Posortuj-Ponownie $siatkaD
+}
+
+$btnDSzukaj.Add_Click({
+    Zajety $true
+    try {
+        Log 'Pytam Windows Update o nowsze sterowniki i firmware (zwykle 1-3 minuty)...'
+        $w = Szukaj-AktualizacjiSterownikow
+        if (-not $w.Ok) {
+            Log ('Windows Update: ' + $w.Blad)
+            Info ('Nie udało się sprawdzić aktualizacji sterowników:' + $NL + $w.Blad)
+            return
+        }
+        $lista = @($w.Lista | Where-Object { $_ })
+        Pokaz-AktualizacjeSterownikow $lista
+        $wazne = @($lista | Where-Object { (Rodzaj-Sterownika $_.Klasa)[1] -eq 'Ważne' }).Count
+        $firmware = @($lista | Where-Object { ([string]$_.Klasa).ToUpper() -eq 'FIRMWARE' }).Count
+        Log ('Dostępne aktualizacje: ' + $lista.Count + ' (ważne: ' + $wazne + ', BIOS i firmware: ' + $firmware + ').')
+        if ($lista.Count -eq 0) { Log 'Windows Update nie ma nowszych sterowników. BIOS sprawdzisz przyciskiem "Narzędzie producenta".' }
+    } finally {
+        Zajety $false
+    }
+})
+
+$btnDInstaluj.Add_Click({
+    $wybrane = @(Zaznaczone $siatkaD | Where-Object { $_.Aktualizacja })
+    if ($wybrane.Count -eq 0) { Info 'Zaznacz sterowniki z dostępną aktualizacją (najpierw kliknij "Sprawdź aktualizacje").'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Nazwa + ': ' + $_.Aktualizacja.Tytul }) -join $NL
+    $pytanie = 'Zainstalować ' + $wybrane.Count + ' aktualizacji sterowników z Windows Update?'
+    if (@($wybrane | Where-Object { $_.Waznosc -eq 'BIOS i firmware' -or ([string]$_.Aktualizacja.Klasa).ToUpper() -eq 'FIRMWARE' }).Count -gt 0) {
+        $pytanie = $pytanie + $NL + $NL + 'BIOS / FIRMWARE: podłącz zasilacz i nie wyłączaj komputera. Aktualizacja dokończy się przy ponownym uruchomieniu.'
+    }
+    if (-not (Pytanie ($pytanie + $NL + $NL + $nazwy))) { return }
+    $restart = $false
+    Zajety $true
+    try {
+        Utworz-PunktPrzywracania 'Przed aktualizacja sterownikow'
+        Log ('Pobieram i instaluję ' + $wybrane.Count + ' sterownik(ów) z Windows Update...')
+        $w = Zainstaluj-AktualizacjeSterownikow @($wybrane | ForEach-Object { [string]$_.Aktualizacja.Id })
+        if (-not $w.Ok) {
+            Log ('BŁĄD: ' + $w.Blad)
+            Info ('Instalacja nie powiodła się:' + $NL + $w.Blad)
+            return
+        }
+        $restart = [bool]$w.Restart
+        foreach ($x in @($w.Wyniki | Where-Object { $_ })) {
+            $opis = Opis-WynikuWU ([int]$x.Kod)
+            Log ('  ' + $x.Tytul + ': ' + $opis)
+            foreach ($r in $siatkaD.Rows) {
+                if ($r.Tag.Aktualizacja -and [string]$r.Tag.Aktualizacja.Id -eq [string]$x.Id) {
+                    $r.Cells[5].Value = $opis + ': ' + $x.Tytul
+                    if ([int]$x.Kod -eq 2 -or [int]$x.Kod -eq 3) {
+                        $r.Cells[5].Style.ForeColor = Kolor 'OK'
+                        Zapisz-Prace 'Sterowniki' ($r.Tag.Nazwa + ': ' + $x.Tytul)
+                    } else {
+                        $r.Cells[5].Style.ForeColor = Kolor 'ŹLE'
+                    }
+                    $r.Cells[0].Value = $false
+                }
+            }
+        }
+    } finally {
+        Zajety $false
+    }
+    if ($restart) { Info 'Uruchom ponownie komputer, żeby dokończyć instalację sterowników.' }
+})
+
+$btnDWazne.Add_Click({
+    foreach ($r in $siatkaD.Rows) { $r.Cells[0].Value = [bool]($r.Tag.Aktualizacja -and $r.Tag.Waznosc -eq 'Ważne') }
+    Aktualizuj-Status
+})
+$btnDWszystkie.Add_Click({
+    foreach ($r in $siatkaD.Rows) { $r.Cells[0].Value = [bool]$r.Tag.Aktualizacja }
+    Aktualizuj-Status
+})
+$btnDOdznacz.Add_Click({ Odznacz-Wszystko $siatkaD })
+$btnDUrzadzenia.Add_Click({ Start-Process -FilePath 'devmgmt.msc' })
+
+$btnDStrona.Add_Click({
+    $s = Strona-Producenta
+    if ($s.Numer) {
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($s.Numer)
+            Log ('Numer seryjny ' + $s.Numer + ' skopiowany do schowka - wklej go na stronie producenta.')
+        } catch { }
+    }
+    Start-Process -FilePath $s.Adres
+})
+
+$btnDProducent.Add_Click({
+    $n = Narzedzie-Producenta
+    if (-not $n) {
+        Log 'Nie rozpoznano producenta - otwieram wyszukiwanie sterowników dla tego modelu.'
+        Start-Process -FilePath (Strona-Producenta).Adres
+        return
+    }
+    $skrot = Znajdz-Skrot $n.Skrot
+    if ($skrot) {
+        Start-Process -FilePath $skrot
+        Log ('Uruchomiono: ' + $n.Etykieta + ' (sterowniki i BIOS od producenta).')
+        return
+    }
+    if (-not $n.Id) {
+        if ($n.Strona) { Start-Process -FilePath $n.Strona }
+        return
+    }
+    if (-not $stan.Winget) { $stan.Winget = Sciezka-Winget }
+    if (-not $stan.Winget) {
+        if ($n.Strona) { Start-Process -FilePath $n.Strona } else { Brak-Winget }
+        return
+    }
+    if (-not (Wymaga-Admina)) { return }
+    if (-not (Pytanie ('Zainstalować ' + $n.Etykieta + '?' + $NL + 'To oficjalne narzędzie producenta - sprawdza sterowniki i BIOS dokładnie dla tego modelu.'))) { return }
+    Zajety $true
+    try {
+        Log ('Instaluję: ' + $n.Etykieta)
+        $wynik = Zainstaluj-Program $stan.Winget $n
+        Log ('  ' + $n.Etykieta + ': ' + $wynik)
+        if ($wynik -eq 'OK') { Zapisz-Prace 'Instalacja' ('Zainstalowano: ' + $n.Etykieta) }
+    } finally {
+        Zajety $false
+    }
+    $skrot = Znajdz-Skrot $n.Skrot
+    if ($skrot) { Start-Process -FilePath $skrot }
+    elseif ($n.Strona) { Start-Process -FilePath $n.Strona }
+    else { Info ($n.Etykieta + ' jest zainstalowany - uruchom go z menu Start.') }
+})
+
+# =====================================================================
+#  OKNO: WYBOR WERSJI STEROWNIKA
+# =====================================================================
+function Wersja-ZTytulu([string]$tytul) {
+    $czesci = $tytul -split ' - '
+    if ($czesci.Count -gt 1) { return $czesci[-1].Trim() }
+    ''
+}
+
+function Porownaj-Wersje([string]$a, [string]$b) {
+    # wynik: -1 a starsza, 0 rowne, 1 a nowsza, $null gdy nie da sie porownac
+    try { return ([version]$a).CompareTo([version]$b) } catch { return $null }
+}
+
+function Dodaj-WierszWersji($g, $v, $zainstalowana) {
+    $dataTxt = ''
+    $ticks = [long]0
+    if ($v.Data) { try { $dataTxt = ([datetime]$v.Data).ToString('yyyy-MM-dd'); $ticks = ([datetime]$v.Data).Ticks } catch { } }
+    $tag = [pscustomobject]@{ Id = $v.Id; Tytul = $v.Tytul; Wersja = $v.Wersja; Data = $v.Data; DataSort = $ticks; Bajty = [long]$v.Bajty
+        Zrodlo = $v.Zrodlo; Aktualizacja = $v.Aktualizacja }
+    $zrodlo = $v.Zrodlo
+    if ($zainstalowana -and (Porownaj-Wersje $v.Wersja $zainstalowana) -eq 0) { $zrodlo = $zrodlo + ' (zainstalowana)' }
+    $idx = $g.Rows.Add($v.Wersja, $dataTxt, $v.Tytul, $v.Produkty, (Tekst-Rozmiaru ([long]$v.Bajty)), $zrodlo)
+    $w = $g.Rows[$idx]
+    $w.Tag = $tag
+    $w.Cells[0].Style.Font = $czcionkaGruba
+    if ($v.Aktualizacja) { $w.Cells[5].Style.ForeColor = Kolor 'OK'; $w.Cells[5].Style.Font = $czcionkaGruba }
+    if ($zrodlo -like '*(zainstalowana)') { $w.Cells[5].Style.ForeColor = Kolor 'INFO' }
+}
+
+function Wypelnij-WersjeSterownika {
+    $ws = $stan.WS
+    $g = $ws.Siatka
+    $s = $ws.Sterownik
+    $g.Rows.Clear()
+    $ws.Panel.Enabled = $false
+    Zajety $true
+    try {
+        if ($s.Aktualizacja) {
+            $u = $s.Aktualizacja
+            $data = $null
+            try { if ($u.Data) { $data = [datetime]::ParseExact([string]$u.Data, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } } catch { }
+            Dodaj-WierszWersji $g ([pscustomobject]@{ Id = $u.Id; Tytul = $u.Tytul; Produkty = 'ten komputer'; Wersja = (Wersja-ZTytulu $u.Tytul); Data = $data
+                Bajty = [long]$u.Rozmiar; Zrodlo = 'Windows Update (zalecana)'; Aktualizacja = $u }) $s.Wersja
+        }
+        if ($s.Sprzet) {
+            Log ('Szukam wersji sterownika w katalogu Microsoft Update: ' + $s.Nazwa + '...')
+            $lista = @(Szukaj-WKatalogu $s.Sprzet)
+            if ($ws.Okno.IsDisposed) { return }
+            foreach ($v in $lista) { Dodaj-WierszWersji $g $v $s.Wersja }
+            Log ('Wersji w katalogu: ' + $lista.Count + '.')
+            if ($lista.Count -eq 0) { Log 'Katalog nie ma wersji dla tego urządzenia (albo brak internetu). Spróbuj "Narzędzie producenta" albo "Strona producenta".' }
+        }
+        if ($g.Rows.Count -gt 0) { $g.Sort($g.Columns[1], [System.ComponentModel.ListSortDirection]::Descending) }
+    } finally {
+        Zajety $false
+        if (-not $ws.Okno.IsDisposed) { $ws.Panel.Enabled = $true }
+    }
+}
+
+function Instaluj-WybranaWersje {
+    $ws = $stan.WS
+    $w = $ws.Siatka.CurrentRow
+    if (-not $w -or -not $w.Tag) { Info 'Kliknij wersję na liście, a potem "Zainstaluj wybraną wersję".'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $v = $w.Tag
+    $s = $ws.Sterownik
+    $pytanie = 'Zainstalować dla: ' + $s.Nazwa + $NL + 'wersję ' + $v.Wersja + ' (' + $v.Zrodlo + ')?'
+    $por = Porownaj-Wersje $v.Wersja $s.Wersja
+    if ($por -eq -1) { $pytanie = $pytanie + $NL + $NL + 'To STARSZA wersja niż zainstalowana (' + $s.Wersja + ') - zostanie wymuszona.' }
+    if ($por -eq 0) { $pytanie = $pytanie + $NL + $NL + 'Ta wersja jest już zainstalowana - zostanie zainstalowana ponownie.' }
+    if ($s.Waznosc -eq 'BIOS i firmware') { $pytanie = $pytanie + $NL + $NL + 'FIRMWARE: podłącz zasilacz i nie wyłączaj komputera.' }
+    if (-not (Pytanie $pytanie)) { return }
+    $ws.Panel.Enabled = $false
+    Zajety $true
+    try {
+        Utworz-PunktPrzywracania 'Przed zmiana wersji sterownika'
+        Log ('Instaluję ' + $s.Nazwa + ', wersja ' + $v.Wersja + ' (' + $v.Zrodlo + ')...')
+        if ($v.Aktualizacja) {
+            $r = Zainstaluj-AktualizacjeSterownikow @([string]$v.Aktualizacja.Id)
+            $ok = [bool]$r.Ok -and (@($r.Wyniki | Where-Object { $_ -and ([int]$_.Kod -eq 2 -or [int]$_.Kod -eq 3) }).Count -gt 0)
+            $metoda = 'Windows Update'
+        } else {
+            $r = Zainstaluj-ZKatalogu $v $s
+            $ok = [bool]$r.Ok
+            $metoda = [string]$r.Metoda
+        }
+        if ($ok) {
+            Log ('  zainstalowano: ' + $s.Nazwa + ' ' + $v.Wersja + ' (' + $metoda + ')')
+            Zapisz-Prace 'Sterowniki' ($s.Nazwa + ': wersja ' + $v.Wersja)
+            $ws.Zainstalowano = $true
+            if ([bool]$r.Restart) { $ws.Restart = $true }
+            Info ('Zainstalowano wersję ' + $v.Wersja + '.' + $(if ([bool]$r.Restart) { $NL + 'Uruchom ponownie komputer, żeby zaczęła działać.' } else { '' }))
+        } else {
+            $blad = [string]$r.Blad
+            if (-not $blad -and $r.Wyniki) { $blad = (@($r.Wyniki) | ForEach-Object { Opis-WynikuWU ([int]$_.Kod) }) -join ', ' }
+            Log ('  BŁĄD: ' + $blad)
+            Info ('Nie udało się zainstalować tej wersji:' + $NL + $blad)
+        }
+    } finally {
+        Zajety $false
+        if (-not $ws.Okno.IsDisposed) { $ws.Panel.Enabled = $true }
+    }
+}
+
+function Pokaz-WersjeSterownika($s) {
+    $okno = New-Object System.Windows.Forms.Form
+    $okno.Text = 'Wybierz wersję sterownika'
+    $okno.Size = New-Object System.Drawing.Size([math]::Min((Px 1080), $szerokoscOkna - 40), [math]::Min((Px 620), $wysokoscOkna - 40))
+    $okno.StartPosition = 'CenterParent'
+    $okno.Icon = $form.Icon
+    $okno.Font = $czcionka
+    $okno.BackColor = [System.Drawing.Color]::White
+
+    $opis = 'Zainstalowany: ' + ((Opis-Wersji $s) -replace "`r?`n", ', ') + '.   Wersje z Windows Update i katalogu Microsoft Update - wybierz jedną ' +
+        'i kliknij "Zainstaluj wybraną wersję". Starszą wersję też można zainstalować (np. gdy nowa sprawia kłopoty).'
+    $naglowek = Nowy-Naglowek $s.Nazwa $opis
+    $siatka = Nowa-Siatka
+    Dodaj-Kolumne $siatka 'Text' 'Wersja' 150 ''
+    Dodaj-Kolumne $siatka 'Text' 'Data' 105 'DataSort'
+    Dodaj-Kolumne $siatka 'Text' 'Nazwa' 0 ''
+    Dodaj-Kolumne $siatka 'Text' 'Dla systemu' 230 ''
+    Dodaj-Kolumne $siatka 'Text' 'Rozmiar' 95 'Bajty'
+    Dodaj-Kolumne $siatka 'Text' 'Źródło' 170 ''
+    $panel = Nowy-PanelPrzyciskow
+    $bInstaluj = Nowy-Przycisk $panel 'Zainstaluj wybraną wersję' $true
+    $bSzukaj = Nowy-Przycisk $panel 'Szukaj ponownie' $false
+    $bZamknij = Nowy-Przycisk $panel 'Zamknij' $false
+    $okno.Controls.Add($siatka)
+    $okno.Controls.Add($naglowek)
+    $okno.Controls.Add($panel)
+
+    $stan.WS = @{ Okno = $okno; Siatka = $siatka; Panel = $panel; Sterownik = $s; Restart = $false; Zainstalowano = $false }
+    $okno.Add_Shown({ Wypelnij-WersjeSterownika })
+    $bSzukaj.Add_Click({ Wypelnij-WersjeSterownika })
+    $bInstaluj.Add_Click({ Instaluj-WybranaWersje })
+    $bZamknij.Add_Click({ $stan.WS.Okno.Close() })
+    $siatka.Add_CellDoubleClick({ param($nadawca, $e) if ($e.RowIndex -ge 0) { Instaluj-WybranaWersje } })
+    $okno.Add_FormClosing({ param($nadawca, $e) if ($stan.Zajety -gt 0) { $e.Cancel = $true } })
+    [void]$okno.ShowDialog($form)
+    $okno.Dispose()
+
+    if ($stan.WS.Zainstalowano) {
+        Zajety $true
+        try { Wypelnij-Sterowniki } finally { Zajety $false }
+        if ($stan.WS.Restart) { Info 'Uruchom ponownie komputer, żeby nowy sterownik zaczął działać.' }
+    }
+}
+
+function Wybierz-WersjeZaznaczonego {
+    $w = $siatkaD.CurrentRow
+    if (-not $w -or -not $w.Tag) { Info 'Kliknij sterownik na liście, a potem "Wybierz wersję...".'; return }
+    if (-not $w.Tag.Sprzet) { Info 'Wersji BIOS-u nie ma w katalogu Microsoft - użyj przycisku "Narzędzie producenta (BIOS)".'; return }
+    Pokaz-WersjeSterownika $w.Tag
+}
+
+$btnDWersja.Add_Click({ Wybierz-WersjeZaznaczonego })
+$siatkaD.Add_CellDoubleClick({ param($nadawca, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -gt 0) { Wybierz-WersjeZaznaczonego } })
+
+# =====================================================================
 #  OKNO: NAJWIEKSZE FOLDERY
 # =====================================================================
 function Rozmiar-FolderuNaZywo([string]$sciezka) {
@@ -3945,6 +4737,7 @@ $zakladki.Add_SelectedIndexChanged({
             elseif ($t -eq $tabNaprawy) { Wypelnij-Naprawy }
             elseif ($t -eq $tabInstalacja) { Wypelnij-Instalacje }
             elseif ($t -eq $tabSprzet) { Wypelnij-Sprzet }
+            elseif ($t -eq $tabSterowniki) { Wypelnij-Sterowniki }
             elseif ($t -eq $tabKopia) { Wypelnij-Kopie; Przelicz-Kopie }
         } finally {
             Zajety $false

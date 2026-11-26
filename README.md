@@ -25,19 +25,20 @@ $TrybPodgladu=1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/u
 Poprzednie wersje, gdyby nowa sprawiała kłopoty (uruchom z PowerShella jako administrator):
 
 ```powershell
+irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-41/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-4/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | iex
 ```
 
 ## Wygląd i konto klienta
 
-- Program otwiera się jako osobna aplikacja z logo serwisu (własna ikona na pasku zadań), bez okna PowerShella. Menu z sekcjami jest po lewej, a obraz jest ostry przy skalowaniu 125–150%.
+- Program otwiera się jako osobna aplikacja z logo (własna ikona na pasku zadań), bez okna PowerShella. Menu z sekcjami jest po lewej, a obraz jest ostry przy skalowaniu 125–150%.
 - Jeśli uprawnienia potwierdzisz innym kontem administratora, program sam wykrywa konto osoby siedzącej przy komputerze. Ustawienia użytkownika, autostart, raport (na jej pulpicie) i kopia danych dotyczą tego konta. W zakładce „Przed reinstalacją” można też wybrać dowolne inne konto.
 
 ## Na górnym pasku
 
 - **Serwis ekspresowy:** jednym kliknięciem wyłącza bezpieczne usługi, czyści dysk, ustawia zalecane opcje Windows, opcjonalnie usuwa zbędne aplikacje i naprawia pliki systemu (DISM + SFC), a na koniec robi raport.
-- **Raport dla klienta:** strona HTML na pulpicie z logo serwisu, wykonanymi pracami, zaleceniami (np. wymiana dysku na SSD, rozbudowa RAM, zużyta bateria), stanem zabezpieczeń i czasem uruchamiania przed i po serwisie. Przycisk na stronie zapisuje ją jako PDF.
+- **Raport dla klienta:** strona HTML na pulpicie z wykonanymi pracami, zaleceniami (np. wymiana dysku na SSD, rozbudowa RAM, zużyta bateria), stanem zabezpieczeń i czasem uruchamiania przed i po serwisie. Przycisk na stronie zapisuje ją jako PDF.
 - **Pomoc zdalna:** uruchamia Szybką pomoc Windows.
 
 ## Zakładki
@@ -51,6 +52,7 @@ irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | i
 - **Naprawy:** DISM, SFC, reset Windows Update, reset sieci, kolejka drukarki, ikony i miniatury, Eksplorator, zegar, sprawdzenie dysku, plany zasilania, Sklep.
 - **Instalacja:** ponad 30 programów przez winget (oficjalne repozytorium Microsoft), pakiety („Podstawowy zestaw”, „Biuro”, „Gracz”, „Diagnostyka”) i aktualizacja wszystkich programów.
 - **Sprzęt:** dyski (zdrowie, zużycie SSD, temperatura, HDD jako systemowy), RAM i wolne sloty, bateria, karta graficzna, urządzenia bez sterowników, aktywacja, klucz Windows z BIOS, czas uruchamiania.
+- **Sterowniki i BIOS:** zainstalowane sterowniki podzespołów (karta graficzna, sieć, dźwięk, chipset...) i wersja BIOS. „Sprawdź aktualizacje” pyta Windows Update o nowsze sterowniki i firmware, a zaznaczone instaluje. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft Update i instaluje wybraną, także starszą. „Narzędzie producenta” instaluje i uruchamia Dell Command Update, Lenovo System Update, HP Support Assistant albo Intel DSA (aktualizacje BIOS-u).
 - **Bezpieczeństwo:** antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta. Do tego szybkie naprawy.
 - **Przed reinstalacją:** kopia sterowników, listy programów, informacji o komputerze z kluczem Windows, zakładek przeglądarek i danych użytkownika (Pulpit, Dokumenty, Obrazy, Pobrane, Muzyka, Wideo, także z OneDrive) wybranego konta na pendrive.
 
@@ -58,4 +60,4 @@ We wszystkich zakładkach można sortować, klikając nagłówek kolumny. Pasek 
 
 Programy pobiera tylko zakładka Instalacja, i to dopiero po kliknięciu. Kopie ustawień, log i lista wykonanych prac są w `C:\ProgramData\UslugiKopia`.
 
-Nazwę serwisu, telefon i link do opinii Google ustawia się na początku pliku `uslugi.ps1` (`$NazwaSerwisu`, `$TelefonSerwisu`, `$LinkOpinii`).
+Domyślnie program i raport nie pokazują żadnej nazwy firmy. Nazwę, telefon i link do opinii Google można ustawić na początku pliku `uslugi.ps1` (`$NazwaSerwisu`, `$TelefonSerwisu`, `$LinkOpinii`).
