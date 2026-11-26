@@ -5,20 +5,31 @@
                    $TrybPodgladu = 1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1 | iex
 
     Zakladki:
-      Uslugi         - ponad 70 uslug w kategoriach, pakiety, wyszukiwarka, sortowanie,
-                       Wylaczony / Reczny, punkt przywracania + kopia, cofanie zmian
-      Autostart      - programy uruchamiane z systemem: wlacz / wylacz (jak w Menedzerze zadan)
-      Programy w tle - co dziala i ile zajmuje pamieci, zamykanie, blokada aplikacji w tle
-      Czyszczenie    - pliki tymczasowe, cache aktualizacji, kosz, przegladarki, DISM
-      Bezpieczenstwo - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM,
-                       BitLocker, konta + szybkie naprawy i raport dla klienta
+      Uslugi             - ponad 70 uslug w kategoriach, pakiety, wyszukiwarka, Wylaczony / Reczny, kopia i cofanie
+      Autostart          - programy uruchamiane z systemem: wlacz / wylacz (jak w Menedzerze zadan)
+      Programy w tle     - co dziala i ile zajmuje pamieci, zamykanie, blokada aplikacji w tle
+      Aplikacje          - usuwanie zbednych aplikacji ze Sklepu (Candy Crush, porady, Cortana...) z pakietami
+      Ustawienia         - reklamy, Bing, Copilot, Recall, widzety, rozszerzenia plikow, hibernacja... z cofaniem
+      Czyszczenie        - pliki tymczasowe, cache aktualizacji, kosz, przegladarki, DISM, najwieksze foldery
+      Naprawy            - DISM, SFC, reset Windows Update, sieci, kolejki drukarki, ikon, zegara, sprawdzenie dysku
+      Instalacja         - programy przez winget (oficjalne repozytorium Microsoft) i aktualizacja wszystkich
+      Sprzet             - dysk (SMART, zuzycie), RAM i wolne sloty, bateria, sterowniki, klucz Windows, czas startu
+      Bezpieczenstwo     - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta
+      Przed reinstalacja - kopia sterownikow, lista programow, klucz, zakladki przegladarek i dane uzytkownika
+    Na gorze: Serwis ekspresowy, Raport dla klienta (HTML/PDF), Pomoc zdalna.
 
     Kliknij naglowek kolumny, zeby posortowac. Nic nie jest zaznaczone na starcie.
-    Nic nie pobiera i nie instaluje. Kopie i log: C:\ProgramData\UslugiKopia
+    Programy pobiera tylko zakladka Instalacja, i to dopiero po kliknieciu. Kopie i log: C:\ProgramData\UslugiKopia
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '3.0'
+$WersjaNarzedzia = '4.0'
+
+# ---------- dane serwisu (baner i raport dla klienta) ----------
+$NazwaSerwisu   = 'Serwis Komputerów Legnica'
+$TelefonSerwisu = ''    # numer pokazywany klientowi, np. '600 100 200'
+$LinkOpinii     = ''    # link "Poproś o opinie" z wizytówki Google
+$QrOpinii       = ''    # kod QR (SVG) z linku do opinii
 
 # ---------- uprawnienia ----------
 $czyAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -44,7 +55,13 @@ if ($czyAdmin) { New-Item -ItemType Directory -Force -Path $folderKopii | Out-Nu
 else { $folderKopii = Join-Path $env:TEMP 'UslugiKopia'; New-Item -ItemType Directory -Force -Path $folderKopii | Out-Null }
 $plikLogu = Join-Path $folderKopii ('log_{0:yyyyMMdd}.txt' -f (Get-Date))
 $NL = [Environment]::NewLine
-$stan = @{ Zaladowane = @{}; Bezpieczenstwo = @() }
+$plikPrac = Join-Path $folderKopii 'prace.csv'
+$plikStartuSerwisu = Join-Path $folderKopii 'serwis_start.txt'
+$stan = @{
+    Zaladowane = @{}; Bezpieczenstwo = @(); Sprzet = @(); Prace = (New-Object System.Collections.ArrayList)
+    KluczWindows = ''; CzasStartu = $null; PunktUtworzony = $false; Winget = $null; ZainstalowaneWinget = @()
+    FolderKopiiDanych = ''; OstatniaKopia = ''; NF = $null; Zajety = 0
+}
 
 # ---------- kolory ----------
 $kolorAkcent      = [System.Drawing.Color]::FromArgb(255, 122, 26)
@@ -196,6 +213,9 @@ $listaCzyszczenia = @(
         'C:\ProgramData\Microsoft\Windows\WER\ReportArchive\*',
         'C:\ProgramData\Microsoft\Windows\WER\ReportQueue\*',
         'C:\ProgramData\Microsoft\Windows\WER\Temp\*') $null
+    Nowa-Pozycja 'Stare kopie Windows Update (po resecie)' 'Foldery odłożone przez naprawę "Reset Windows Update". Po udanej aktualizacji można je usunąć.' $true @(
+        'C:\Windows\SoftwareDistribution.old_*',
+        'C:\Windows\System32\catroot2.old_*') $null
     Nowa-Pozycja 'Kosz' 'Opróżnia kosz na wszystkich dyskach. Zapytaj klienta, czy niczego tam nie potrzebuje!' $false @('C:\$Recycle.Bin\*') {
         param($sciezki)
         Clear-RecycleBin -Force -ErrorAction SilentlyContinue
@@ -211,12 +231,8 @@ $listaCzyszczenia = @(
         'C:\Windows\MEMORY.DMP') $null
     Nowa-Pozycja 'Stare składniki aktualizacji (DISM)' 'Usuwa stare wersje składników Windows. Trwa kilka do kilkunastu minut; rozmiaru nie da się policzyć wcześniej.' $false @() {
         param($sciezki)
-        $proc = Start-Process -FilePath 'dism.exe' -ArgumentList '/Online /Cleanup-Image /StartComponentCleanup' -WindowStyle Hidden -PassThru
-        while (-not $proc.HasExited) {
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 300
-        }
-        Log ('  DISM zakończony, kod: ' + $proc.ExitCode)
+        $w = Uruchom-Program 'dism.exe /Online /Cleanup-Image /StartComponentCleanup' 'DISM'
+        Log ('  DISM zakończony, kod: ' + $w.Kod)
     }
 )
 
@@ -266,9 +282,13 @@ function Wymaga-Admina {
 }
 
 function Zajety([bool]$tak) {
-    $zakladki.Enabled = -not $tak
-    if ($tak) { $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor }
-    else { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+    # licznik, bo operacje bywaja zagniezdzone (np. serwis ekspresowy -> raport)
+    if ($tak) { $stan.Zajety++ } elseif ($stan.Zajety -gt 0) { $stan.Zajety-- }
+    $wolne = ($stan.Zajety -eq 0)
+    $zakladki.Enabled = $wolne
+    if ($banerPrawy) { $banerPrawy.Enabled = $wolne }
+    if ($wolne) { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+    else { $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor }
     [System.Windows.Forms.Application]::DoEvents()
 }
 
@@ -449,6 +469,7 @@ function Nowa-Zakladka([string]$tytul, $siatka, [string]$naglowek, $panel) {
     $t.Controls.Add($siatka)
     $t.Controls.Add((Nowy-Naglowek $naglowek))
     $t.Controls.Add($panel)
+    $t.Tag = $siatka
     [void]$zakladki.TabPages.Add($t)
     $t
 }
@@ -466,19 +487,16 @@ function Odznacz-Wszystko($siatka) {
 function Aktualizuj-Status {
     if (-not $statusLbl -or -not $zakladki) { return }
     $t = $zakladki.SelectedTab
-    if ($t -eq $tabBezp) {
-        $w = @($stan.Bezpieczenstwo)
+    if (-not $t) { return }
+    if ($t -eq $tabBezp -or $t -eq $tabSprzet) {
+        if ($t -eq $tabBezp) { $w = @($stan.Bezpieczenstwo) } else { $w = @($stan.Sprzet) }
         $statusLbl.Text = ('Do naprawy: {0}    Do poprawy: {1}    W porządku: {2}' -f
             @($w | Where-Object { $_.Ocena -eq 'ŹLE' }).Count,
             @($w | Where-Object { $_.Ocena -eq 'UWAGA' }).Count,
             @($w | Where-Object { $_.Ocena -eq 'OK' }).Count)
         return
     }
-    $siatka = $null
-    if ($t -eq $tabUslugi) { $siatka = $siatkaU }
-    elseif ($t -eq $tabAutostart) { $siatka = $siatkaA }
-    elseif ($t -eq $tabProgramy) { $siatka = $siatkaP }
-    elseif ($t -eq $tabCzyszczenie) { $siatka = $siatkaC }
+    $siatka = $t.Tag
     if (-not $siatka) { $statusLbl.Text = ''; return }
     $wszystkie = $siatka.Rows.Count; $widoczne = 0; $zaznaczone = 0
     foreach ($r in $siatka.Rows) {
@@ -487,6 +505,581 @@ function Aktualizuj-Status {
     }
     $statusLbl.Text = "Pozycji: $wszystkie    Widocznych: $widoczne    Zaznaczonych: $zaznaczone"
 }
+
+# ---------- siatka z wynikami sprawdzen (Bezpieczenstwo, Sprzet) ----------
+function Wypelnij-Wyniki($siatka, $wyniki) {
+    $siatka.Rows.Clear()
+    foreach ($w in $wyniki) {
+        $idx = $siatka.Rows.Add($w.Nazwa, $w.Wynik, $w.Ocena, $w.Rada)
+        $wiersz = $siatka.Rows[$idx]
+        $wiersz.Tag = $w
+        $wiersz.Cells[0].Style.Font = $czcionkaGruba
+        $wiersz.Cells[2].Style.ForeColor = Kolor $w.Ocena
+        $wiersz.Cells[2].Style.Font = $czcionkaGruba
+        $wiersz.Cells[3].Style.ForeColor = $kolorSzary
+    }
+    Posortuj-Ponownie $siatka
+}
+
+# ---------- rejestr wykonanych prac (do raportu, przezywa restart) ----------
+function Poczatek-Serwisu {
+    if (-not (Test-Path -LiteralPath $plikStartuSerwisu)) { return $null }
+    try {
+        $tekst = [string](Get-Content -LiteralPath $plikStartuSerwisu -TotalCount 1)
+        return [datetime]::ParseExact($tekst.Trim(), 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+    } catch { return $null }
+}
+
+function Zapisz-Prace([string]$rodzaj, [string]$opis, [long]$wartosc) {
+    $wpis = [pscustomobject]@{ Data = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Rodzaj = $rodzaj; Opis = $opis; Wartosc = $wartosc }
+    [void]$stan.Prace.Add($wpis)
+    try {
+        $pocz = Poczatek-Serwisu
+        if (-not $pocz -or ((Get-Date) - $pocz).TotalDays -gt 7) {
+            Set-Content -LiteralPath $plikStartuSerwisu -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) -Encoding ASCII
+        }
+        $wpis | Export-Csv -LiteralPath $plikPrac -Append -NoTypeInformation -Encoding UTF8
+    } catch { }
+}
+
+function Prace-Serwisu {
+    $pocz = Poczatek-Serwisu
+    if (-not $pocz -or -not (Test-Path -LiteralPath $plikPrac)) { return @($stan.Prace) }
+    $od = $pocz.ToString('yyyy-MM-dd HH:mm:ss')
+    try { return @(Import-Csv -LiteralPath $plikPrac | Where-Object { $_.Data -ge $od }) } catch { return @($stan.Prace) }
+}
+
+# ---------- uruchamianie programow konsolowych bez zawieszania okna ----------
+function Czytaj-Wyjscie([string]$plik) {
+    if (-not (Test-Path -LiteralPath $plik)) { return '' }
+    $bajty = [IO.File]::ReadAllBytes($plik)
+    if ($bajty.Length -eq 0) { return '' }
+    $ile = [math]::Min($bajty.Length, 400)
+    $zera = 0
+    for ($i = 1; $i -lt $ile; $i += 2) { if ($bajty[$i] -eq 0) { $zera++ } }
+    if ($zera -gt ($ile / 8)) { return [Text.Encoding]::Unicode.GetString($bajty) }
+    try { return (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bajty) } catch { }
+    try {
+        $kod = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        return $kod.GetString($bajty)
+    } catch { return [Text.Encoding]::Default.GetString($bajty) }
+}
+
+function Ostatnie-Linie([string]$tekst, [int]$ile) {
+    $linie = @($tekst -split "[`r`n]+" | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and $_ -match '[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]' })
+    if ($linie.Count -le $ile) { return $linie }
+    $linie[($linie.Count - $ile)..($linie.Count - 1)]
+}
+
+function Uruchom-Program([string]$polecenie, [string]$opis) {
+    $plikWy = Join-Path $env:TEMP ('serwis_' + [guid]::NewGuid().ToString('N') + '.txt')
+    $argumenty = '/d /s /c "' + $polecenie + ' > "' + $plikWy + '" 2>&1"'
+    $start = Get-Date
+    $ostatni = Get-Date
+    $proc = Start-Process -FilePath $env:ComSpec -ArgumentList $argumenty -WindowStyle Hidden -PassThru
+    $null = $proc.Handle
+    while (-not $proc.HasExited) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 250
+        if (((Get-Date) - $ostatni).TotalSeconds -ge 60) {
+            $ostatni = Get-Date
+            Log ('  ' + $opis + ': trwa (' + [int]((Get-Date) - $start).TotalMinutes + ' min)...')
+        }
+    }
+    $proc.WaitForExit()
+    $kod = $proc.ExitCode
+    $tekst = Czytaj-Wyjscie $plikWy
+    Remove-Item -LiteralPath $plikWy -Force -ErrorAction SilentlyContinue
+    [pscustomobject]@{ Kod = $kod; Tekst = $tekst }
+}
+
+# ---------- rejestr ----------
+function Czytaj-Rejestr([string]$klucz, [string]$nazwa) {
+    if (-not (Test-Path -LiteralPath $klucz)) { return $null }
+    (Get-Item -LiteralPath $klucz).GetValue($nazwa)
+}
+
+function Ustaw-Rejestr([string]$klucz, [string]$nazwa, $wartosc, [string]$typ) {
+    if (-not $typ) { $typ = 'DWord' }
+    if (-not (Test-Path -LiteralPath $klucz)) { New-Item -Path $klucz -Force | Out-Null }
+    New-ItemProperty -LiteralPath $klucz -Name $nazwa -Value $wartosc -PropertyType $typ -Force | Out-Null
+}
+
+function Usun-Rejestr([string]$klucz, [string]$nazwa) {
+    if (Test-Path -LiteralPath $klucz) { Remove-ItemProperty -LiteralPath $klucz -Name $nazwa -ErrorAction SilentlyContinue }
+}
+
+# ---------- rozne ----------
+function Html([string]$tekst) {
+    if (-not $tekst) { return '' }
+    $tekst.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&#39;')
+}
+
+function Restart-Eksploratora {
+    Stop-Process -Name 'explorer' -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process -Name 'explorer' -ErrorAction SilentlyContinue)) { Start-Process -FilePath 'explorer.exe' }
+}
+
+function Utworz-PunktPrzywracania([string]$opis) {
+    if ($stan.PunktUtworzony) { return }
+    Log 'Tworzę punkt przywracania (może potrwać do minuty)...'
+    try {
+        Checkpoint-Computer -Description $opis -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop -WarningAction SilentlyContinue
+        Log 'Punkt przywracania gotowy (albo Windows użył tego sprzed mniej niż 24 h).'
+        $stan.PunktUtworzony = $true
+        return
+    } catch {
+        Log ('Punkt przywracania się nie udał: ' + $_.Exception.Message)
+    }
+    try {
+        Enable-ComputerRestore -Drive ($env:SystemDrive + '\') -ErrorAction Stop
+        Log ('Włączono ochronę systemu (punkty przywracania) na dysku ' + $env:SystemDrive)
+        Checkpoint-Computer -Description $opis -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop -WarningAction SilentlyContinue
+        Log 'Punkt przywracania gotowy.'
+        $stan.PunktUtworzony = $true
+    } catch {
+        Log ('UWAGA: punkt przywracania niedostępny: ' + $_.Exception.Message)
+    }
+}
+
+# =====================================================================
+#  DANE: NAPRAWY (kazda Akcja zwraca krotki opis wyniku)
+# =====================================================================
+function Nowa-Naprawa($etykieta, $opis, $czas, $restart, $akcja) {
+    [pscustomobject]@{ Etykieta = $etykieta; Opis = $opis; Czas = $czas; Restart = $restart; Akcja = $akcja }
+}
+
+$listaNapraw = @(
+    Nowa-Naprawa 'Naprawa obrazu systemu (DISM)' 'Sprawdza i naprawia magazyn składników Windows, z którego korzysta SFC. Pobiera brakujące pliki z Windows Update, więc potrzebny jest internet. Uruchom przed SFC.' '10-30 min' 'nie' {
+        $w = Uruchom-Program 'dism.exe /Online /Cleanup-Image /RestoreHealth' 'DISM'
+        $linie = @(Ostatnie-Linie $w.Tekst 2)
+        foreach ($l in $linie) { Log ('  ' + $l) }
+        if ($w.Kod -eq 0) { 'zakończona poprawnie' } else { 'błąd, kod ' + $w.Kod + ' ' + ($linie -join ' ') }
+    }
+    Nowa-Naprawa 'Naprawa plików systemu (SFC)' 'Sprawdza wszystkie pliki Windows i podmienia uszkodzone na poprawne. Pomaga przy dziwnych błędach, zawieszkach i niedziałających funkcjach.' '10-20 min' 'czasem' {
+        $w = Uruchom-Program 'sfc.exe /scannow' 'SFC'
+        $linie = @(Ostatnie-Linie $w.Tekst 2)
+        foreach ($l in $linie) { Log ('  ' + $l) }
+        if ($linie.Count -gt 0) { $linie[-1] } else { 'zakończona, kod ' + $w.Kod }
+    }
+    Nowa-Naprawa 'Reset Windows Update' 'Gdy aktualizacje się nie pobierają albo kończą błędem. Zatrzymuje usługi aktualizacji, odkłada ich pamięć podręczną na bok (do usunięcia w Czyszczeniu) i uruchamia je od nowa.' '1 min' 'zalecany' {
+        Stop-Service -Name 'wuauserv', 'bits', 'cryptsvc', 'msiserver' -Force -ErrorAction SilentlyContinue
+        $dopisek = '.old_' + (Get-Date -Format 'yyyyMMddHHmmss')
+        $ok = 0
+        foreach ($f in @((Join-Path $env:windir 'SoftwareDistribution'), (Join-Path $env:windir 'System32\catroot2'))) {
+            if (-not (Test-Path -LiteralPath $f)) { continue }
+            try {
+                Rename-Item -LiteralPath $f -NewName ((Split-Path -Path $f -Leaf) + $dopisek) -ErrorAction Stop
+                $ok++
+            } catch { Log ('  nie udało się odłożyć ' + $f + ': ' + $_.Exception.Message) }
+        }
+        Start-Service -Name 'cryptsvc', 'bits', 'wuauserv' -ErrorAction SilentlyContinue
+        'wyczyszczono pamięć podręczną aktualizacji (' + $ok + ' z 2 folderów)'
+    }
+    Nowa-Naprawa 'Reset sieci' 'Gdy internet nie działa mimo połączenia, strony się nie otwierają albo są błędy DNS. Resetuje Winsock, ustawienia TCP/IP i czyści pamięć DNS.' '1 min' 'TAK' {
+        $kody = @()
+        foreach ($p in @('netsh.exe winsock reset', 'netsh.exe int ip reset', 'ipconfig.exe /flushdns')) {
+            $w = Uruchom-Program $p $p
+            $kody += $w.Kod
+            Log ('  ' + $p + ': kod ' + $w.Kod)
+        }
+        if (@($kody | Where-Object { $_ -ne 0 }).Count -eq 0) { 'wykonano, uruchom ponownie komputer' } else { 'częściowo (kody: ' + ($kody -join ', ') + ')' }
+    }
+    Nowa-Naprawa 'Odblokowanie kolejki drukarki' 'Gdy wydruki wiszą w kolejce i nie da się ich usunąć. Zatrzymuje bufor wydruku, usuwa zawieszone zadania i uruchamia go ponownie.' '30 s' 'nie' {
+        $svc = Get-Service -Name 'Spooler' -ErrorAction SilentlyContinue
+        if (-not $svc) { return 'brak usługi bufora wydruku' }
+        if ([string]$svc.StartType -eq 'Disabled') { return 'bufor wydruku jest wyłączony (zakładka Usługi)' }
+        Stop-Service -Name 'Spooler' -Force -ErrorAction SilentlyContinue
+        $folder = Join-Path $env:windir 'System32\spool\PRINTERS'
+        $ile = @(Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue).Count
+        Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        Start-Service -Name 'Spooler' -ErrorAction SilentlyContinue
+        'usunięto plików z kolejki: ' + $ile
+    }
+    Nowa-Naprawa 'Odbudowa ikon i miniatur' 'Gdy ikony są puste, białe albo nieaktualne, a miniatury zdjęć się nie pokazują. Pulpit na chwilę zniknie.' '20 s' 'nie' {
+        $lok = $env:LOCALAPPDATA
+        Stop-Process -Name 'explorer' -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 1000
+        $usuniete = 0
+        foreach ($wz in @((Join-Path $lok 'IconCache.db'), (Join-Path $lok 'Microsoft\Windows\Explorer\iconcache_*.db'), (Join-Path $lok 'Microsoft\Windows\Explorer\thumbcache_*.db'))) {
+            foreach ($f in @(Get-ChildItem -Path $wz -Force -ErrorAction SilentlyContinue)) {
+                try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $usuniete++ } catch { }
+            }
+        }
+        if (-not (Get-Process -Name 'explorer' -ErrorAction SilentlyContinue)) { Start-Process -FilePath 'explorer.exe' }
+        'usunięto plików pamięci ikon: ' + $usuniete
+    }
+    Nowa-Naprawa 'Restart Eksploratora' 'Gdy pasek zadań, menu Start albo pulpit przestały reagować.' '5 s' 'nie' {
+        Restart-Eksploratora
+        'wykonano'
+    }
+    Nowa-Naprawa 'Synchronizacja zegara' 'Gdy zegar się spóźnia albo strony pokazują błędy certyfikatów. Włącza usługę czasu i synchronizuje z time.windows.com.' '20 s' 'nie' {
+        $svc = Get-Service -Name 'W32Time' -ErrorAction SilentlyContinue
+        if ($svc -and [string]$svc.StartType -eq 'Disabled') { Set-Service -Name 'W32Time' -StartupType Manual }
+        Start-Service -Name 'W32Time' -ErrorAction SilentlyContinue
+        $w = Uruchom-Program 'w32tm.exe /resync /force' 'w32tm'
+        if ($w.Kod -ne 0) {
+            [void](Uruchom-Program 'w32tm.exe /config /manualpeerlist:"time.windows.com,0x9" /syncfromflags:manual /update' 'w32tm')
+            Start-Sleep -Seconds 2
+            $w = Uruchom-Program 'w32tm.exe /resync /force' 'w32tm'
+        }
+        if ($w.Kod -eq 0) { 'zegar zsynchronizowany: ' + (Get-Date -Format 'HH:mm:ss') } else { 'nie udało się (kod ' + $w.Kod + '), sprawdź internet' }
+    }
+    Nowa-Naprawa 'Sprawdzenie dysku C: przy restarcie' 'Oznacza dysk systemowy do sprawdzenia (chkdsk). Sprawdzenie ruszy przy najbliższym uruchomieniu i może potrwać kilkanaście minut.' 'przy restarcie' 'TAK' {
+        $w = Uruchom-Program ('fsutil.exe dirty set ' + $env:SystemDrive) 'fsutil'
+        if ($w.Kod -eq 0) { 'zaplanowano, ruszy przy najbliższym uruchomieniu' } else { 'nie udało się: ' + (@(Ostatnie-Linie $w.Tekst 1) -join ' ') }
+    }
+    Nowa-Naprawa 'Domyślne plany zasilania' 'Gdy komputer nie usypia się, budzi sam albo plany zasilania są popsute. Przywraca fabryczne plany Windows.' '5 s' 'nie' {
+        $w = Uruchom-Program 'powercfg.exe -restoredefaultschemes' 'powercfg'
+        if ($w.Kod -eq 0) { 'przywrócono' } else { 'błąd, kod ' + $w.Kod }
+    }
+    Nowa-Naprawa 'Reset Sklepu Microsoft' 'Gdy Sklep się nie otwiera albo aplikacje się nie pobierają. Czyści pamięć podręczną Sklepu (na koniec Sklep sam się otworzy).' '30 s' 'nie' {
+        Start-Process -FilePath 'wsreset.exe'
+        'uruchomiono (Sklep otworzy się po zakończeniu)'
+    }
+)
+
+# =====================================================================
+#  DANE: ZBEDNE APLIKACJE ZE SKLEPU
+# =====================================================================
+function Nowa-Aplikacja($wzorce, $kategoria, $etykieta, $opis, $rodzaj) {
+    [pscustomobject]@{ Wzorce = @($wzorce); Kategoria = $kategoria; Etykieta = $etykieta; Opis = $opis; Rodzaj = $rodzaj }
+}
+# Rodzaj: Zalecane = zwykle nikt ich nie uzywa; Opcjonalne = zapytaj klienta.
+$listaAplikacji = @(
+    Nowa-Aplikacja @('king.com.*') 'Gry i reklamy' 'Gry King (Candy Crush itp.)' 'Gry dorzucane do Windows, z reklamami i płatnościami w grze.' 'Zalecane'
+    Nowa-Aplikacja @('*TikTok*') 'Gry i reklamy' 'TikTok' 'Skrót do TikToka dorzucony do Windows.' 'Zalecane'
+    Nowa-Aplikacja @('*Facebook*', '*Instagram*') 'Gry i reklamy' 'Facebook i Instagram' 'Skróty dorzucone do Windows; w przeglądarce działają tak samo.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.MicrosoftSolitaireCollection') 'Gry i reklamy' 'Pasjans (Solitaire Collection)' 'Gry karciane z reklamami. Starsze osoby często w nie grają - zapytaj.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.MicrosoftOfficeHub') 'Gry i reklamy' 'Microsoft 365 (Office) - reklama' 'Zachęca do kupna Microsoft 365. Nie usuwa zainstalowanego Office.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.BingNews', 'Microsoft.News') 'Microsoft' 'Wiadomości (Microsoft Start)' 'Wiadomości z reklamami.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.BingSearch') 'Microsoft' 'Wyszukiwanie Bing' 'Dodatkowa aplikacja wyszukiwarki Bing.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.Getstarted') 'Microsoft' 'Porady' 'Podpowiedzi Microsoft "Jak zacząć".' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.WindowsFeedbackHub') 'Microsoft' 'Centrum opinii' 'Wysyłanie opinii do Microsoft.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.549981C3F5F10') 'Microsoft' 'Cortana' 'Asystentka wycofana przez Microsoft.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.SkypeApp') 'Microsoft' 'Skype' 'Skype został wyłączony przez Microsoft w 2025 roku.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.MixedReality.Portal') 'Microsoft' 'Portal rzeczywistości mieszanej' 'Do gogli VR Windows Mixed Reality (wycofanych).' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.Microsoft3DViewer', 'Microsoft.Print3D', 'Microsoft.3DBuilder', 'Microsoft.MSPaint') 'Microsoft' 'Aplikacje 3D (Paint 3D, Podgląd 3D...)' 'Wycofane aplikacje do 3D. Zwykły Paint zostaje.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.OneConnect', 'Microsoft.Messaging', 'Microsoft.Wallet') 'Microsoft' 'Plany mobilne, Wiadomości, Portfel' 'Stare, nieużywane dodatki Windows 10.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.Windows.DevHome') 'Microsoft' 'Dev Home' 'Narzędzie dla programistów, wycofane przez Microsoft.' 'Zalecane'
+    Nowa-Aplikacja @('Microsoft.GetHelp') 'Microsoft' 'Uzyskaj pomoc' 'Czat z pomocą techniczną Microsoft.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.BingWeather') 'Microsoft' 'Pogoda' 'Aplikacja pogodowa.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.WindowsMaps') 'Microsoft' 'Mapy' 'Mapy Microsoft (rzadko używane).' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.People') 'Microsoft' 'Kontakty' 'Książka adresowa (stara).' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.Copilot', 'Microsoft.Windows.Ai.Copilot.Provider') 'Microsoft' 'Copilot' 'Asystent AI Microsoft.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.YourPhone') 'Microsoft' 'Łącze z telefonem' 'Połączenie telefonu z komputerem (SMS, zdjęcia).' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.PowerAutomateDesktop') 'Microsoft' 'Power Automate' 'Automatyzacja zadań, potrzebna nielicznym.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.Todos') 'Microsoft' 'Microsoft To Do' 'Lista zadań.' 'Opcjonalne'
+    Nowa-Aplikacja @('MicrosoftTeams') 'Microsoft' 'Teams (osobisty)' 'Teams do użytku domowego (czat Windows 11). Nie usuwa Teams firmowego.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.OutlookForWindows') 'Microsoft' 'Nowy Outlook' 'Nowa aplikacja poczty. Zapytaj, czy klient jej używa.' 'Opcjonalne'
+    Nowa-Aplikacja @('microsoft.windowscommunicationsapps') 'Microsoft' 'Poczta i Kalendarz' 'Stara aplikacja poczty. Zapytaj, czy klient jej używa.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.Office.OneNote') 'Microsoft' 'OneNote dla Windows 10' 'Notatki (stara wersja).' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.MicrosoftStickyNotes') 'Microsoft' 'Karteczki' 'Karteczki na pulpicie.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.WindowsAlarms') 'Microsoft' 'Alarmy i zegar' 'Budzik, minutnik, stoper.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.WindowsSoundRecorder') 'Microsoft' 'Rejestrator dźwięku' 'Nagrywanie z mikrofonu.' 'Opcjonalne'
+    Nowa-Aplikacja @('MicrosoftCorporationII.MicrosoftFamily') 'Microsoft' 'Microsoft Family' 'Kontrola rodzicielska. Zapytaj, czy klient jej używa.' 'Opcjonalne'
+    Nowa-Aplikacja @('Clipchamp.Clipchamp') 'Multimedia' 'Clipchamp' 'Edytor wideo Microsoft.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.ZuneVideo') 'Multimedia' 'Filmy i TV' 'Stary odtwarzacz filmów.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.ZuneMusic') 'Multimedia' 'Groove / Odtwarzacz multimediów' 'W Windows 11 to domyślny odtwarzacz muzyki i wideo!' 'Opcjonalne'
+    Nowa-Aplikacja @('SpotifyAB.SpotifyMusic') 'Multimedia' 'Spotify (ze Sklepu)' 'Muzyka. Zapytaj, czy klient używa.' 'Opcjonalne'
+    Nowa-Aplikacja @('4DF9E0F8.Netflix', 'AmazonVideo.PrimeVideo', 'Disney.37853FC22B2CE') 'Multimedia' 'Netflix, Prime Video, Disney+' 'Skróty do serwisów wideo.' 'Opcjonalne'
+    Nowa-Aplikacja @('Microsoft.GamingApp', 'Microsoft.XboxApp', 'Microsoft.XboxGamingOverlay', 'Microsoft.XboxGameOverlay', 'Microsoft.XboxSpeechToTextOverlay', 'Microsoft.Xbox.TCUI') 'Xbox' 'Xbox (aplikacja, Game Bar, nakładki)' 'Dla graczy: Game Pass, nagrywanie gier (Win+G). Logowanie Xbox w grach zostaje.' 'Opcjonalne'
+)
+
+$pakietyAplikacji = [ordered]@{
+    'Wszystkie zalecane (bezpieczne)' = '*ZALECANE*'
+    'Gry i reklamy'                   = 'Gry i reklamy'
+    'Multimedia i serwisy wideo'      = 'Multimedia'
+    'Xbox'                            = 'Xbox'
+    'Wszystkie aplikacje Microsoft'   = 'Microsoft'
+}
+
+# =====================================================================
+#  DANE: PROGRAMY DO INSTALACJI (winget - oficjalne repozytorium Microsoft)
+# =====================================================================
+function Nowy-Program($id, $kategoria, $etykieta, $opis) {
+    [pscustomobject]@{ Id = $id; Kategoria = $kategoria; Etykieta = $etykieta; Opis = $opis }
+}
+$listaProgramow = @(
+    Nowy-Program 'Google.Chrome'                     'Przeglądarki'   'Google Chrome'          'Najpopularniejsza przeglądarka.'
+    Nowy-Program 'Mozilla.Firefox.pl'                'Przeglądarki'   'Mozilla Firefox (PL)'   'Przeglądarka dbająca o prywatność, wersja polska.'
+    Nowy-Program 'Brave.Brave'                       'Przeglądarki'   'Brave'                  'Przeglądarka z wbudowanym blokowaniem reklam.'
+    Nowy-Program 'Opera.Opera'                       'Przeglądarki'   'Opera'                  'Przeglądarka z darmowym VPN.'
+    Nowy-Program 'TheDocumentFoundation.LibreOffice' 'Biuro'          'LibreOffice'            'Darmowy pakiet biurowy (dokumenty, arkusze, prezentacje).'
+    Nowy-Program 'Adobe.Acrobat.Reader.64-bit'       'Biuro'          'Adobe Acrobat Reader'   'Przeglądarka PDF.'
+    Nowy-Program 'SumatraPDF.SumatraPDF'             'Biuro'          'SumatraPDF'             'Lekka i szybka przeglądarka PDF.'
+    Nowy-Program 'geeksoftwareGmbH.PDF24Creator'     'Biuro'          'PDF24 Creator'          'Łączenie, dzielenie i edycja PDF, drukarka PDF.'
+    Nowy-Program 'Mozilla.Thunderbird.pl'            'Biuro'          'Thunderbird (PL)'       'Program do poczty.'
+    Nowy-Program 'Notepad++.Notepad++'               'Narzędzia'      'Notepad++'              'Rozbudowany edytor tekstu.'
+    Nowy-Program '7zip.7zip'                         'Narzędzia'      '7-Zip'                  'Archiwizer (zip, rar, 7z).'
+    Nowy-Program 'IrfanSkiljan.IrfanView'            'Narzędzia'      'IrfanView'              'Szybka przeglądarka zdjęć.'
+    Nowy-Program 'voidtools.Everything'              'Narzędzia'      'Everything'             'Błyskawiczne wyszukiwanie plików.'
+    Nowy-Program 'Microsoft.PowerToys'               'Narzędzia'      'PowerToys'              'Dodatki Microsoft do Windows.'
+    Nowy-Program 'VideoLAN.VLC'                      'Multimedia'     'VLC'                    'Odtwarzacz, który otworzy każdy film.'
+    Nowy-Program 'Spotify.Spotify'                   'Multimedia'     'Spotify'                'Muzyka.'
+    Nowy-Program 'GIMP.GIMP.3'                       'Multimedia'     'GIMP'                   'Darmowy edytor grafiki.'
+    Nowy-Program 'Audacity.Audacity'                 'Multimedia'     'Audacity'               'Edytor dźwięku.'
+    Nowy-Program 'Zoom.Zoom'                         'Komunikacja'    'Zoom'                   'Wideorozmowy.'
+    Nowy-Program 'Discord.Discord'                   'Komunikacja'    'Discord'                'Czat głosowy i tekstowy.'
+    Nowy-Program 'Rakuten.Viber'                     'Komunikacja'    'Viber'                  'Komunikator.'
+    Nowy-Program 'AnyDesk.AnyDesk'                   'Pomoc zdalna'   'AnyDesk'                'Zdalny pulpit - pomoc na odległość.'
+    Nowy-Program 'TeamViewer.TeamViewer'             'Pomoc zdalna'   'TeamViewer'             'Zdalny pulpit - pomoc na odległość.'
+    Nowy-Program 'Valve.Steam'                       'Gry'            'Steam'                  'Sklep i biblioteka gier.'
+    Nowy-Program 'EpicGames.EpicGamesLauncher'       'Gry'            'Epic Games'             'Sklep i biblioteka gier.'
+    Nowy-Program 'Microsoft.VCRedist.2015+.x64'      'Systemowe'      'Visual C++ 2015-2022 (64-bit)' 'Biblioteki wymagane przez wiele gier i programów.'
+    Nowy-Program 'Microsoft.VCRedist.2015+.x86'      'Systemowe'      'Visual C++ 2015-2022 (32-bit)' 'Biblioteki wymagane przez wiele gier i programów.'
+    Nowy-Program 'Microsoft.DotNet.DesktopRuntime.8' 'Systemowe'      '.NET Desktop Runtime 8' 'Wymagany przez część programów.'
+    Nowy-Program 'Microsoft.DirectX'                 'Systemowe'      'DirectX (starsze biblioteki)' 'Potrzebne starszym grom.'
+    Nowy-Program 'Oracle.JavaRuntimeEnvironment'     'Systemowe'      'Java 8'                 'Tylko jeśli klient ma program, który jej wymaga.'
+    Nowy-Program 'Malwarebytes.Malwarebytes'         'Bezpieczeństwo' 'Malwarebytes'           'Skaner złośliwego oprogramowania (darmowe skanowanie na żądanie).'
+    Nowy-Program 'CrystalDewWorld.CrystalDiskInfo'   'Diagnostyka'    'CrystalDiskInfo'        'Stan i temperatura dysków (SMART).'
+    Nowy-Program 'CrystalDewWorld.CrystalDiskMark'   'Diagnostyka'    'CrystalDiskMark'        'Test szybkości dysku.'
+    Nowy-Program 'CPUID.CPU-Z'                       'Diagnostyka'    'CPU-Z'                  'Informacje o procesorze, płycie i pamięci.'
+    Nowy-Program 'CPUID.HWMonitor'                   'Diagnostyka'    'HWMonitor'              'Temperatury i napięcia.'
+    Nowy-Program 'REALiX.HWiNFO'                     'Diagnostyka'    'HWiNFO'                 'Pełna diagnostyka sprzętu.'
+)
+
+$pakietyProgramow = [ordered]@{
+    'Podstawowy zestaw'      = @('Google.Chrome', '7zip.7zip', 'VideoLAN.VLC', 'Adobe.Acrobat.Reader.64-bit', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86')
+    'Biuro'                  = @('TheDocumentFoundation.LibreOffice', 'geeksoftwareGmbH.PDF24Creator', 'Mozilla.Thunderbird.pl', 'Notepad++.Notepad++')
+    'Gracz'                  = @('Valve.Steam', 'EpicGames.EpicGamesLauncher', 'Discord.Discord', 'Microsoft.VCRedist.2015+.x64', 'Microsoft.VCRedist.2015+.x86', 'Microsoft.DirectX')
+    'Diagnostyka serwisowa'  = @('CrystalDewWorld.CrystalDiskInfo', 'CrystalDewWorld.CrystalDiskMark', 'CPUID.CPU-Z', 'CPUID.HWMonitor', 'REALiX.HWiNFO')
+    'Pomoc zdalna'           = @('AnyDesk.AnyDesk')
+}
+
+# =====================================================================
+#  DANE: USTAWIENIA WINDOWS (Sprawdz zwraca $true, gdy ustawienie jest zastosowane)
+# =====================================================================
+$kCDM   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+$kAdv   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+$kMenu  = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'
+$wartosciCDM = @('SubscribedContent-338388Enabled', 'SubscribedContent-338389Enabled', 'SubscribedContent-353694Enabled',
+    'SubscribedContent-353696Enabled', 'SubscribedContent-338393Enabled', 'SubscribedContent-310093Enabled',
+    'SubscribedContent-338387Enabled', 'SystemPaneSuggestionsEnabled', 'SilentInstalledAppsEnabled', 'SoftLandingEnabled',
+    'RotatingLockScreenOverlayEnabled')
+
+function Nowe-Ustawienie($etykieta, $opis, $rodzaj, $eksplorator, $sprawdz, $zastosuj, $cofnij) {
+    [pscustomobject]@{ Etykieta = $etykieta; Opis = $opis; Rodzaj = $rodzaj; Eksplorator = $eksplorator
+        Sprawdz = $sprawdz; Zastosuj = $zastosuj; Cofnij = $cofnij }
+}
+
+$listaUstawien = @(
+    Nowe-Ustawienie 'Bez reklam i sugestii w Windows' 'Wyłącza propozycje aplikacji w menu Start, porady, reklamy na ekranie blokady, ekrany "Dokończ konfigurację" po aktualizacjach i automatyczne instalowanie promowanych aplikacji.' 'Zalecane' $true {
+        ((Czytaj-Rejestr $kCDM 'SubscribedContent-338388Enabled') -eq 0) -and ((Czytaj-Rejestr $kCDM 'SilentInstalledAppsEnabled') -eq 0)
+    } {
+        foreach ($n in $wartosciCDM) { Ustaw-Rejestr $kCDM $n 0 }
+        Ustaw-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' 'ScoobeSystemSettingEnabled' 0
+        Ustaw-Rejestr $kAdv 'Start_IrisRecommendations' 0
+        Ustaw-Rejestr $kAdv 'ShowSyncProviderNotifications' 0
+    } {
+        foreach ($n in $wartosciCDM) { Ustaw-Rejestr $kCDM $n 1 }
+        Usun-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' 'ScoobeSystemSettingEnabled'
+        Usun-Rejestr $kAdv 'Start_IrisRecommendations'
+        Usun-Rejestr $kAdv 'ShowSyncProviderNotifications'
+    }
+    Nowe-Ustawienie 'Bez identyfikatora reklamowego' 'Aplikacje nie dostaną identyfikatora do śledzenia i dopasowywania reklam.' 'Zalecane' $false {
+        (Czytaj-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled') -eq 0
+    } {
+        Ustaw-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 0
+    } {
+        Ustaw-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 1
+    }
+    Nowe-Ustawienie 'Bez wyników Bing w menu Start' 'Wyszukiwanie w menu Start szuka tylko na komputerze: szybciej i bez reklam z internetu.' 'Zalecane' $true {
+        (Czytaj-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions') -eq 1
+    } {
+        Ustaw-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions' 1
+        Ustaw-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'BingSearchEnabled' 0
+    } {
+        Usun-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions'
+        Usun-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'BingSearchEnabled'
+    }
+    Nowe-Ustawienie 'Bez Recall (zrzuty ekranu AI)' 'Recall w Windows 11 co kilka sekund robi zrzuty ekranu, żeby AI mogło je przeszukiwać. Wyłączenie blokuje tę funkcję.' 'Zalecane' $false {
+        (Czytaj-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis') -eq 1
+    } {
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'AllowRecallEnablement' 0
+        Ustaw-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1
+    } {
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'AllowRecallEnablement'
+        Usun-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis'
+    }
+    Nowe-Ustawienie 'Bez widżetów i wiadomości na pasku' 'Usuwa z paska zadań pogodę, wiadomości i widżety (Windows 10 i 11). Mniej pracy w tle.' 'Zalecane' $true {
+        (Czytaj-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests') -eq 0
+    } {
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' 'EnableFeeds' 0
+    } {
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' 'EnableFeeds'
+    }
+    Nowe-Ustawienie 'Bez Copilota' 'Wyłącza Copilota w Windows i jego przycisk na pasku. Nowszą aplikację Copilot usuniesz w zakładce Aplikacje.' 'Opcjonalne' $true {
+        (Czytaj-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot') -eq 1
+    } {
+        Ustaw-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
+        Ustaw-Rejestr $kAdv 'ShowCopilotButton' 0
+    } {
+        Usun-Rejestr 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot'
+        Usun-Rejestr $kAdv 'ShowCopilotButton'
+    }
+    Nowe-Ustawienie 'Telemetria na minimum' 'Windows wysyła do Microsoft tylko wymagane minimum danych diagnostycznych i nie pyta o opinie.' 'Zalecane' $false {
+        $v = Czytaj-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry'
+        ($null -ne $v) -and ([int]$v -le 1)
+    } {
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 1
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'DoNotShowFeedbackNotifications' 1
+    } {
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'DoNotShowFeedbackNotifications'
+    }
+    Nowe-Ustawienie 'Bez historii aktywności' 'Windows nie zapisuje i nie wysyła historii używanych aplikacji i plików.' 'Zalecane' $false {
+        (Czytaj-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities') -eq 0
+    } {
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableActivityFeed' 0
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities' 0
+        Ustaw-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'UploadUserActivities' 0
+    } {
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableActivityFeed'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities'
+        Usun-Rejestr 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'UploadUserActivities'
+    }
+    Nowe-Ustawienie 'Pokazuj rozszerzenia plików' 'Widać, czy plik to .pdf, czy .exe - łatwiej rozpoznać wirusa udającego dokument.' 'Zalecane' $true {
+        (Czytaj-Rejestr $kAdv 'HideFileExt') -eq 0
+    } {
+        Ustaw-Rejestr $kAdv 'HideFileExt' 0
+    } {
+        Ustaw-Rejestr $kAdv 'HideFileExt' 1
+    }
+    Nowe-Ustawienie 'Pokazuj ukryte pliki' 'Eksplorator pokazuje ukryte pliki i foldery (np. AppData). Przydatne przy serwisie.' 'Opcjonalne' $true {
+        (Czytaj-Rejestr $kAdv 'Hidden') -eq 1
+    } {
+        Ustaw-Rejestr $kAdv 'Hidden' 1
+    } {
+        Ustaw-Rejestr $kAdv 'Hidden' 2
+    }
+    Nowe-Ustawienie 'Klasyczne menu prawego przycisku (Win 11)' 'Od razu pełne menu pod prawym przyciskiem myszy, bez klikania "Pokaż więcej opcji".' 'Opcjonalne' $true {
+        Test-Path -LiteralPath ($kMenu + '\InprocServer32')
+    } {
+        $k = $kMenu + '\InprocServer32'
+        if (-not (Test-Path -LiteralPath $k)) { New-Item -Path $k -Force | Out-Null }
+        Set-Item -LiteralPath $k -Value ''
+    } {
+        if (Test-Path -LiteralPath $kMenu) { Remove-Item -LiteralPath $kMenu -Recurse -Force }
+    }
+    Nowe-Ustawienie 'Przycisk Start po lewej (Win 11)' 'Menu Start i ikony na pasku zadań po lewej stronie, jak w Windows 10.' 'Opcjonalne' $true {
+        (Czytaj-Rejestr $kAdv 'TaskbarAl') -eq 0
+    } {
+        Ustaw-Rejestr $kAdv 'TaskbarAl' 0
+    } {
+        Usun-Rejestr $kAdv 'TaskbarAl'
+    }
+    Nowe-Ustawienie 'Wyłącz szybkie uruchamianie' 'Komputer naprawdę się wyłącza. Rozwiązuje sporo dziwnych problemów (sterowniki, aktualizacje, USB), ale start trwa kilka sekund dłużej.' 'Opcjonalne' $false {
+        (Czytaj-Rejestr 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled') -eq 0
+    } {
+        Ustaw-Rejestr 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0
+    } {
+        Ustaw-Rejestr 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 1
+    }
+    Nowe-Ustawienie 'Wyłącz hibernację' 'Usuwa plik hibernacji i odzyskuje kilka GB na dysku C:. Na laptopach zapytaj, czy klient korzysta z hibernacji. Wyłącza też szybkie uruchamianie.' 'Opcjonalne' $false {
+        (Czytaj-Rejestr 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' 'HibernateEnabled') -eq 0
+    } {
+        [void](Uruchom-Program 'powercfg.exe /hibernate off' 'powercfg')
+    } {
+        [void](Uruchom-Program 'powercfg.exe /hibernate on' 'powercfg')
+    }
+    Nowe-Ustawienie 'Plan zasilania: wysoka wydajność' 'Procesor nie zwalnia, żeby oszczędzać prąd. Dla komputerów stacjonarnych; na laptopie skraca czas na baterii.' 'Opcjonalne' $false {
+        $w = (& powercfg.exe /getactivescheme) -join ' '
+        $w -match '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    } {
+        $w = Uruchom-Program 'powercfg.exe /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' 'powercfg'
+        if ($w.Kod -ne 0) { throw 'tego planu nie ma na tym komputerze (częste w nowych laptopach)' }
+    } {
+        [void](Uruchom-Program 'powercfg.exe /setactive 381b4222-f694-41f0-9685-ff5bb260df2e' 'powercfg')
+    }
+)
+
+# =====================================================================
+#  DANE: KOPIA PRZED REINSTALACJA
+# =====================================================================
+function Folder-Pobrane {
+    $v = Czytaj-Rejestr 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' '{374DE290-123F-4565-9164-39C4925E467B}'
+    if ($v) { return [Environment]::ExpandEnvironmentVariables([string]$v) }
+    Join-Path $env:USERPROFILE 'Downloads'
+}
+
+function Nowa-Kopia($etykieta, $opis, $zaznacz, $zrodlo, $cel, $akcja) {
+    [pscustomobject]@{ Etykieta = $etykieta; Opis = $opis; Zaznacz = $zaznacz; Zrodlo = $zrodlo; Cel = $cel; Akcja = $akcja; Bajty = [long]-1 }
+}
+
+$listaKopii = @(
+    Nowa-Kopia 'Sterowniki' 'Wszystkie zainstalowane sterowniki producentów. Po reinstalacji: Menedżer urządzeń > Aktualizuj sterownik > wskaż ten folder.' $true '' 'Sterowniki' {
+        param($el, $cel)
+        New-Item -ItemType Directory -Force -Path $cel | Out-Null
+        $w = Uruchom-Program ('dism.exe /Online /Export-Driver /Destination:"' + $cel + '"') 'eksport sterowników'
+        $ile = @(Get-ChildItem -LiteralPath $cel -Directory -ErrorAction SilentlyContinue).Count
+        if ($w.Kod -eq 0) { 'skopiowano sterowników: ' + $ile } else { 'błąd, kod ' + $w.Kod }
+    }
+    Nowa-Kopia 'Lista zainstalowanych programów' 'Plik z listą programów, żeby po reinstalacji niczego nie zapomnieć.' $true '' 'Programy' {
+        param($el, $cel)
+        New-Item -ItemType Directory -Force -Path $cel | Out-Null
+        $lista = @(Lista-Programow)
+        $lista | Export-Csv -LiteralPath (Join-Path $cel 'Programy.csv') -NoTypeInformation -Encoding UTF8
+        $linie = @($lista | ForEach-Object { $_.Nazwa + '   ' + $_.Wersja + '   (' + $_.Wydawca + ')' })
+        $linie | Out-File -FilePath (Join-Path $cel 'Programy.txt') -Encoding UTF8
+        'zapisano programów: ' + $lista.Count
+    }
+    Nowa-Kopia 'Informacje o komputerze i klucz Windows' 'Model, procesor, pamięć, dyski i klucz Windows z BIOS/UEFI (jeśli jest).' $true '' 'Komputer' {
+        param($el, $cel)
+        New-Item -ItemType Directory -Force -Path $cel | Out-Null
+        if (@($stan.Sprzet).Count -eq 0) { $stan.Sprzet = @(Sprawdz-Sprzet) }
+        $linie = New-Object System.Collections.ArrayList
+        [void]$linie.Add('Komputer: ' + $env:COMPUTERNAME + '   ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
+        if ($infoOS) { [void]$linie.Add('System: ' + $infoOS) }
+        if ($stan.KluczWindows) { [void]$linie.Add('Klucz Windows z BIOS/UEFI: ' + $stan.KluczWindows) }
+        [void]$linie.Add('')
+        foreach ($w in $stan.Sprzet) { [void]$linie.Add($w.Nazwa + ': ' + $w.Wynik) }
+        $linie | Out-File -FilePath (Join-Path $cel 'Komputer.txt') -Encoding UTF8
+        'zapisano'
+    }
+    Nowa-Kopia 'Zakładki przeglądarek' 'Zakładki Chrome, Edge i Firefoksa (dla konta, na którym działa program).' $true '' 'Zakladki' {
+        param($el, $cel)
+        New-Item -ItemType Directory -Force -Path $cel | Out-Null
+        $ile = 0
+        $chromowe = @(
+            @{ Nazwa = 'Chrome'; Sciezka = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data' }
+            @{ Nazwa = 'Edge'; Sciezka = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data' }
+            @{ Nazwa = 'Brave'; Sciezka = Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data' }
+            @{ Nazwa = 'Opera'; Sciezka = Join-Path $env:APPDATA 'Opera Software\Opera Stable' }
+        )
+        foreach ($p in $chromowe) {
+            if (-not (Test-Path -LiteralPath $p.Sciezka)) { continue }
+            foreach ($plik in @(Get-ChildItem -Path (Join-Path $p.Sciezka '*\Bookmarks') -File -ErrorAction SilentlyContinue) + @(Get-ChildItem -Path (Join-Path $p.Sciezka 'Bookmarks') -File -ErrorAction SilentlyContinue)) {
+                $profil = Split-Path -Path (Split-Path -Path $plik.FullName -Parent) -Leaf
+                Copy-Item -LiteralPath $plik.FullName -Destination (Join-Path $cel ($p.Nazwa + '_' + $profil + '_Bookmarks.json')) -Force
+                $ile++
+            }
+        }
+        $ff = Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles'
+        foreach ($prof in @(Get-ChildItem -LiteralPath $ff -Directory -ErrorAction SilentlyContinue)) {
+            $kopie = Join-Path $prof.FullName 'bookmarkbackups'
+            if (Test-Path -LiteralPath $kopie) {
+                Copy-Item -LiteralPath $kopie -Destination (Join-Path $cel ('Firefox_' + $prof.Name)) -Recurse -Force
+                $ile++
+            }
+        }
+        'skopiowano zestawów zakładek: ' + $ile
+    }
+    Nowa-Kopia 'Pulpit' 'Pliki z pulpitu.' $false ([Environment]::GetFolderPath('Desktop')) 'Pulpit' $null
+    Nowa-Kopia 'Dokumenty' 'Folder Dokumenty. Pliki z OneDrive dostępne tylko w chmurze zostaną pobrane.' $false ([Environment]::GetFolderPath('MyDocuments')) 'Dokumenty' $null
+    Nowa-Kopia 'Obrazy' 'Zdjęcia i obrazy.' $false ([Environment]::GetFolderPath('MyPictures')) 'Obrazy' $null
+    Nowa-Kopia 'Pobrane' 'Folder Pobrane.' $false (Folder-Pobrane) 'Pobrane' $null
+    Nowa-Kopia 'Muzyka' 'Folder Muzyka.' $false ([Environment]::GetFolderPath('MyMusic')) 'Muzyka' $null
+    Nowa-Kopia 'Wideo' 'Folder Wideo.' $false ([Environment]::GetFolderPath('MyVideos')) 'Wideo' $null
+)
 
 # =====================================================================
 #  FUNKCJE: USLUGI
@@ -671,7 +1264,7 @@ function Sprawdz-Bezpieczenstwo {
     try {
         $build = [int]$os.BuildNumber
         if ($build -lt 22000) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Wersja Windows' "$($os.Caption) (kompilacja $build)" 'ŹLE' 'Windows 10 nie ma już wsparcia Microsoft (od 14.10.2025). Zaproponuj Windows 11 lub nowszy sprzęt.'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Wersja Windows' "$($os.Caption) (kompilacja $build)" 'ŹLE' 'Windows 10 nie ma już wsparcia Microsoft (od 14.10.2025) - zalecana aktualizacja do Windows 11 albo nowszy sprzęt.'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Wersja Windows' "$($os.Caption) (kompilacja $build)" 'OK' ''))
         }
@@ -685,7 +1278,7 @@ function Sprawdz-Bezpieczenstwo {
         if ($aktywne.Count -eq 0) {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Antywirus' 'brak aktywnego antywirusa' 'ŹLE' 'Włącz Microsoft Defender albo zainstalowany antywirus.'))
         } elseif ($stare.Count -gt 0) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Antywirus' (($aktywne.displayName) -join ', ') 'UWAGA' 'Bazy wirusów są nieaktualne - zaktualizuj.'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Antywirus' (($aktywne.displayName) -join ', ') 'UWAGA' 'Bazy wirusów są nieaktualne - należy je zaktualizować.'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Antywirus' ((($aktywne.displayName) -join ', ') + ' - aktywny, aktualny') 'OK' ''))
         }
@@ -699,7 +1292,7 @@ function Sprawdz-Bezpieczenstwo {
         if (-not $mp.RealTimeProtectionEnabled) {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Microsoft Defender' $txt 'INFO' 'Wyłączony - w porządku, jeśli działa inny antywirus (patrz wyżej).'))
         } elseif ($mp.AntivirusSignatureAge -gt 3) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Microsoft Defender' $txt 'UWAGA' 'Kliknij "Aktualizuj Defendera".'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Microsoft Defender' $txt 'UWAGA' 'Bazy antywirusa są nieaktualne - należy je zaktualizować.'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Microsoft Defender' $txt 'OK' ''))
         }
@@ -711,7 +1304,7 @@ function Sprawdz-Bezpieczenstwo {
         $wylaczone = @($profile | Where-Object { -not $_.Enabled })
         $txt = ($profile | ForEach-Object { $_.Name + ': ' + $(if ($_.Enabled) { 'wł.' } else { 'WYŁ.' }) }) -join ', '
         if ($wylaczone.Count -gt 0) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Zapora Windows' $txt 'ŹLE' 'Kliknij "Włącz zaporę" (chyba że działa zapora z innego programu).'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Zapora Windows' $txt 'ŹLE' 'Zapora powinna być włączona (chyba że działa zapora innego programu).'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Zapora Windows' $txt 'OK' ''))
         }
@@ -725,7 +1318,7 @@ function Sprawdz-Bezpieczenstwo {
             $txt = "ostatnia: $($ostatnia.HotFixID), $dni dni temu"
             if ($dni -gt 90) { $ocena = 'ŹLE' } elseif ($dni -gt 45) { $ocena = 'UWAGA' } else { $ocena = 'OK' }
             $rada = ''
-            if ($ocena -ne 'OK') { $rada = 'Kliknij "Windows Update" i zainstaluj aktualizacje.' }
+            if ($ocena -ne 'OK') { $rada = 'Zalecana instalacja aktualizacji Windows.' }
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Aktualizacje Windows' $txt $ocena $rada))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Aktualizacje Windows' 'brak danych' 'UWAGA' 'Sprawdź Windows Update ręcznie.'))
@@ -736,7 +1329,7 @@ function Sprawdz-Bezpieczenstwo {
     try {
         $dniOdStartu = [int]((Get-Date) - $os.LastBootUpTime).TotalDays
         if ($dniOdStartu -gt 14) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Ostatni restart' "$dniOdStartu dni temu" 'UWAGA' 'Uruchom ponownie, żeby dokończyć aktualizacje.'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Ostatni restart' "$dniOdStartu dni temu" 'UWAGA' 'Zalecane ponowne uruchomienie, żeby dokończyć aktualizacje.'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Ostatni restart' "$dniOdStartu dni temu" 'OK' ''))
         }
@@ -768,7 +1361,7 @@ function Sprawdz-Bezpieczenstwo {
     try {
         $smb = Get-SmbServerConfiguration -ErrorAction Stop
         if ($smb.EnableSMB1Protocol) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Protokół SMBv1' 'włączony' 'ŹLE' 'Przestarzały i niebezpieczny (WannaCry). Kliknij "Wyłącz SMBv1".'))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Protokół SMBv1' 'włączony' 'ŹLE' 'Przestarzały i niebezpieczny protokół (wykorzystywany przez wirusa WannaCry) - zalecane wyłączenie.'))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Protokół SMBv1' 'wyłączony' 'OK' ''))
         }
@@ -809,7 +1402,7 @@ function Sprawdz-Bezpieczenstwo {
     try {
         $gosc = Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value -like '*-501' }
         if ($gosc -and $gosc.Enabled) {
-            [void]$wyniki.Add((Wynik-Sprawdzenia 'Konto Gość' 'włączone' 'ŹLE' ('Wyłącz poleceniem: Disable-LocalUser -SID ' + $gosc.SID.Value)))
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Konto Gość' 'włączone' 'ŹLE' ('Konto Gość powinno być wyłączone (Disable-LocalUser -SID ' + $gosc.SID.Value + ').')))
         } else {
             [void]$wyniki.Add((Wynik-Sprawdzenia 'Konto Gość' 'wyłączone' 'OK' ''))
         }
@@ -820,6 +1413,548 @@ function Sprawdz-Bezpieczenstwo {
     } catch { }
 
     $wyniki
+}
+
+# =====================================================================
+#  FUNKCJE: SPRZET
+# =====================================================================
+function Typ-Pamieci([int]$smbios, [int]$typ) {
+    $mapaSmbios = @{ 18 = 'DDR'; 19 = 'DDR2'; 24 = 'DDR3'; 26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3'; 30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5' }
+    $mapaStara = @{ 20 = 'DDR'; 21 = 'DDR2'; 24 = 'DDR3' }
+    if ($mapaSmbios.ContainsKey($smbios)) { return $mapaSmbios[$smbios] }
+    if ($mapaStara.ContainsKey($typ)) { return $mapaStara[$typ] }
+    ''
+}
+
+function Opis-BleduUrzadzenia($kod) {
+    switch ([int]$kod) {
+        1       { 'źle skonfigurowane' }
+        3       { 'uszkodzony sterownik' }
+        10      { 'nie może się uruchomić' }
+        18      { 'sterownik do ponownej instalacji' }
+        28      { 'brak sterownika' }
+        31      { 'nie działa poprawnie' }
+        43      { 'zgłosiło problem (kod 43)' }
+        default { 'kod błędu ' + $kod }
+    }
+}
+
+function Pobierz-CzasyStartu {
+    $wynik = New-Object System.Collections.ArrayList
+    $zdarzenia = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 40 -ErrorAction Stop)
+    foreach ($z in $zdarzenia) {
+        $x = [xml]$z.ToXml()
+        $ms = 0
+        foreach ($d in @($x.Event.EventData.Data)) { if ($d.Name -eq 'BootTime') { $ms = [double]$d.'#text' } }
+        if ($ms -gt 0) { [void]$wynik.Add([pscustomobject]@{ Data = $z.TimeCreated; Sekundy = [int][math]::Round($ms / 1000) }) }
+    }
+    $wynik
+}
+
+function Podsumuj-CzasStartu($czasy, $poczatek) {
+    $lista = @($czasy | Where-Object { $_ } | Sort-Object -Property Data)
+    if ($lista.Count -eq 0) { return $null }
+    $ostatni = $lista[-1]
+    $przed = $null; $po = $null
+    if ($poczatek) {
+        $p1 = @($lista | Where-Object { $_.Data -lt $poczatek } | Select-Object -Last 3)
+        $p2 = @($lista | Where-Object { $_.Data -ge $poczatek })
+        if ($p1.Count -gt 0) { $przed = [int][math]::Round(($p1 | Measure-Object -Property Sekundy -Average).Average) }
+        if ($p2.Count -gt 0) { $po = $p2[-1].Sekundy }
+    }
+    $ostatnie = @($lista | Select-Object -Last 5)
+    $srednio = [int][math]::Round(($ostatnie | Measure-Object -Property Sekundy -Average).Average)
+    [pscustomobject]@{ Ostatni = $ostatni.Sekundy; Kiedy = $ostatni.Data; Srednio = $srednio; Przed = $przed; Po = $po }
+}
+
+function Sprawdz-Sprzet {
+    $wyniki = New-Object System.Collections.ArrayList
+    $os = $null; $cs = $null
+    try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop } catch { }
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop } catch { }
+
+    # Komputer, BIOS, numer seryjny
+    try {
+        $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop
+        $plyta = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+        $txt = (([string]$cs.Manufacturer).Trim() + ' ' + ([string]$cs.Model).Trim()).Trim()
+        if ($plyta) { $txt = $txt + '; płyta: ' + (([string]$plyta.Manufacturer).Trim() + ' ' + ([string]$plyta.Product).Trim()).Trim() }
+        $txt = $txt + '; BIOS ' + $bios.SMBIOSBIOSVersion
+        if ($bios.ReleaseDate) { $txt = $txt + ' z ' + $bios.ReleaseDate.ToString('yyyy-MM-dd') }
+        [void]$wyniki.Add((Wynik-Sprawdzenia 'Komputer' $txt 'INFO' ''))
+        $sn = ([string]$bios.SerialNumber).Trim()
+        if ($sn -and $sn -notmatch 'To be filled|Default|System Serial|^0+$') {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Numer seryjny' $sn 'INFO' 'Do sprawdzenia gwarancji i sterowników na stronie producenta.'))
+        }
+    } catch { }
+
+    # Procesor
+    try {
+        $c = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)[0]
+        $txt = (([string]$c.Name) -replace '\s+', ' ').Trim() + '; rdzenie: ' + $c.NumberOfCores + ', wątki: ' + $c.NumberOfLogicalProcessors
+        [void]$wyniki.Add((Wynik-Sprawdzenia 'Procesor' $txt 'INFO' ''))
+    } catch { }
+
+    # Pamiec RAM
+    try {
+        $moduly = @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction Stop)
+        $tablice = @(Get-CimInstance -ClassName Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue | Where-Object { $_.Use -eq 3 })
+        $sloty = [int](($tablice | Measure-Object -Property MemoryDevices -Sum).Sum)
+        $bajty = [double](($moduly | Measure-Object -Property Capacity -Sum).Sum)
+        if ($bajty -le 0 -and $cs) { $bajty = [double]$cs.TotalPhysicalMemory }
+        $gb = [math]::Round($bajty / 1GB)
+        $typ = ''; $mhz = 0
+        if ($moduly.Count -gt 0) {
+            $typ = Typ-Pamieci ([int]$moduly[0].SMBIOSMemoryType) ([int]$moduly[0].MemoryType)
+            $mhz = [int]$moduly[0].ConfiguredClockSpeed
+            if (-not $mhz) { $mhz = [int]$moduly[0].Speed }
+        }
+        $txt = [string]$gb + ' GB'
+        if ($typ) { $txt = $txt + ' ' + $typ }
+        if ($mhz) { $txt = $txt + ' ' + $mhz + ' MHz' }
+        if ($moduly.Count -gt 0) { $txt = $txt + ' (' + (($moduly | ForEach-Object { [string][math]::Round($_.Capacity / 1GB) + ' GB' }) -join ' + ') + ')' }
+        $wolne = 0
+        if ($sloty -gt 0 -and $sloty -ge $moduly.Count) {
+            $wolne = $sloty - $moduly.Count
+            $txt = $txt + '; sloty: zajęte ' + $moduly.Count + ' z ' + $sloty
+        }
+        if ($gb -lt 4) { $ocena = 'ŹLE'; $rada = 'Za mało pamięci na współczesny Windows - zalecana rozbudowa do co najmniej 8 GB.' }
+        elseif ($gb -lt 8) { $ocena = 'UWAGA'; $rada = 'Do Windows 11 i przeglądarki zalecane 8-16 GB. Rozbudowa wyraźnie przyspieszy komputer.' }
+        elseif ($gb -lt 16 -and $wolne -gt 0) { $ocena = 'INFO'; $rada = 'Wolne sloty: ' + $wolne + ' - łatwa rozbudowa, gdy klient potrzebuje więcej.' }
+        else { $ocena = 'OK'; $rada = '' }
+        if (($ocena -eq 'ŹLE' -or $ocena -eq 'UWAGA') -and $wolne -gt 0) { $rada = $rada + ' Wolne sloty: ' + $wolne + '.' }
+        [void]$wyniki.Add((Wynik-Sprawdzenia 'Pamięć RAM' $txt $ocena $rada))
+    } catch { }
+
+    # Dyski
+    $systemowy = ''
+    try { $systemowy = [string](Get-Partition -DriveLetter ($env:SystemDrive.Substring(0, 1)) -ErrorAction Stop).DiskNumber } catch { }
+    try {
+        $dyski = @(Get-PhysicalDisk -ErrorAction Stop | Where-Object { [string]$_.BusType -ne 'USB' } | Sort-Object -Property DeviceId)
+        foreach ($d in $dyski) {
+            $rel = $null
+            try { $rel = $d | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+            $bus = [string]$d.BusType
+            $typ = [string]$d.MediaType
+            if ($typ -ne 'SSD' -and $typ -ne 'HDD') { if ($bus -eq 'NVMe') { $typ = 'SSD' } else { $typ = 'dysk' } }
+            $czySys = ([string]$d.DeviceId -eq $systemowy)
+            $nazwa = 'Dysk ' + $d.DeviceId
+            if ($czySys) { $nazwa = $nazwa + ' (systemowy)' }
+            $txt = ([string]$d.FriendlyName).Trim() + '; ' + $typ + ' ' + $bus + ', ' + [math]::Round($d.Size / 1GB) + ' GB; stan: ' + [string]$d.HealthStatus
+            $ocena = 'OK'
+            $rady = New-Object System.Collections.ArrayList
+            if ([string]$d.HealthStatus -eq 'Unhealthy') { $ocena = 'ŹLE'; [void]$rady.Add('Dysk zgłasza awarię - pilnie potrzebna kopia danych i wymiana dysku.') }
+            elseif ([string]$d.HealthStatus -eq 'Warning') { $ocena = 'UWAGA'; [void]$rady.Add('Dysk zgłasza ostrzeżenie - zalecana kopia danych i rozważenie wymiany.') }
+            if ($rel) {
+                if ($rel.Temperature -gt 0) { $txt = $txt + '; temp. ' + $rel.Temperature + ' °C' }
+                if ($typ -eq 'SSD' -and $null -ne $rel.Wear) { $txt = $txt + '; zużycie ' + $rel.Wear + '%' }
+                if ($rel.PowerOnHours -gt 0) { $txt = $txt + '; przepracował ' + $rel.PowerOnHours + ' h' }
+                if ($rel.Wear -ge 90) { $ocena = 'ŹLE'; [void]$rady.Add('Dysk SSD prawie zużyty - zalecana wymiana.') }
+                elseif ($rel.Wear -ge 70) { if ($ocena -eq 'OK') { $ocena = 'UWAGA' }; [void]$rady.Add('Dysk SSD mocno zużyty - warto zaplanować wymianę.') }
+                if ($rel.Temperature -ge 60) { if ($ocena -eq 'OK') { $ocena = 'UWAGA' }; [void]$rady.Add('Wysoka temperatura dysku - zalecane sprawdzenie chłodzenia.') }
+                if ($rel.ReadErrorsUncorrected -gt 0) { if ($ocena -eq 'OK') { $ocena = 'UWAGA' }; [void]$rady.Add('Dysk ma nienaprawialne błędy odczytu - zalecana kopia danych.') }
+            }
+            if ($typ -eq 'HDD' -and $czySys) {
+                if ($ocena -eq 'OK') { $ocena = 'UWAGA' }
+                [void]$rady.Add('System na dysku talerzowym (HDD) - wymiana na SSD przyspieszy komputer kilkukrotnie.')
+            }
+            [void]$wyniki.Add((Wynik-Sprawdzenia $nazwa $txt $ocena ($rady -join ' ')))
+        }
+    } catch { [void]$wyniki.Add((Wynik-Sprawdzenia 'Dyski' 'nie udało się sprawdzić' 'UWAGA' '')) }
+
+    try {
+        $smart = @(Get-CimInstance -Namespace 'root/wmi' -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop | Where-Object { $_.PredictFailure })
+        if ($smart.Count -gt 0) {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'SMART' ('dysk przewiduje awarię (' + $smart.Count + ')') 'ŹLE' 'Dysk sam zgłasza, że niedługo może się zepsuć - natychmiast potrzebna kopia danych i wymiana.'))
+        }
+    } catch { }
+
+    # Wolne miejsce
+    try {
+        foreach ($v in @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
+            if (-not $v.Size) { continue }
+            $proc = [math]::Round(100 * $v.FreeSpace / $v.Size)
+            $txt = 'wolne ' + (Tekst-Rozmiaru $v.FreeSpace) + ' z ' + (Tekst-Rozmiaru $v.Size) + ' (' + $proc + '%)'
+            if ($proc -lt 10) { $o = 'ŹLE'; $r = 'Bardzo mało miejsca - Windows zwalnia i może nie zainstalować aktualizacji. Warto usunąć zbędne pliki.' }
+            elseif ($proc -lt 20) { $o = 'UWAGA'; $r = 'Mało miejsca - warto usunąć zbędne pliki.' }
+            else { $o = 'OK'; $r = '' }
+            [void]$wyniki.Add((Wynik-Sprawdzenia ('Miejsce na dysku ' + $v.DeviceID) $txt $o $r))
+        }
+    } catch { }
+
+    # Karta graficzna
+    try {
+        foreach ($g in @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)) {
+            $n = [string]$g.Name
+            if ($n -match 'Remote Display|Indirect Display|Virtual Display') { continue }
+            if ($n -match 'Microsoft Basic Display|Podstawowa karta') {
+                [void]$wyniki.Add((Wynik-Sprawdzenia 'Karta graficzna' $n 'ŹLE' 'Brak sterownika karty graficznej - do zainstalowania ze strony producenta (Intel, AMD, NVIDIA).'))
+                continue
+            }
+            $txt = $n + '; sterownik ' + $g.DriverVersion
+            if ($g.DriverDate) { $txt = $txt + ' z ' + $g.DriverDate.ToString('yyyy-MM-dd') }
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Karta graficzna' $txt 'OK' ''))
+        }
+    } catch { }
+
+    # Bateria
+    try {
+        $bat = @(Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop)
+        if ($bat.Count -gt 0) {
+            $txt = 'naładowana w ' + $bat[0].EstimatedChargeRemaining + '%'
+            $ocena = 'INFO'; $rada = 'Pełny raport: przycisk "Raport baterii".'
+            try {
+                $proj = [double](@(Get-CimInstance -Namespace 'root/wmi' -ClassName BatteryStaticData -ErrorAction Stop) | Measure-Object -Property DesignedCapacity -Sum).Sum
+                $pel = [double](@(Get-CimInstance -Namespace 'root/wmi' -ClassName BatteryFullChargedCapacity -ErrorAction Stop) | Measure-Object -Property FullChargedCapacity -Sum).Sum
+                if ($proj -gt 0 -and $pel -gt 0) {
+                    $zuz = [int][math]::Max(0, [math]::Round(100 - 100 * $pel / $proj))
+                    $txt = $txt + '; pojemność ' + [math]::Round($pel / 1000, 1) + ' z ' + [math]::Round($proj / 1000, 1) + ' Wh, zużycie ' + $zuz + '%'
+                    if ($zuz -ge 50) { $ocena = 'ŹLE'; $rada = 'Bateria mocno zużyta - zalecana wymiana.' }
+                    elseif ($zuz -ge 30) { $ocena = 'UWAGA'; $rada = 'Bateria wyraźnie zużyta - działa krócej niż nowa.' }
+                    else { $ocena = 'OK'; $rada = '' }
+                }
+            } catch { }
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Bateria' $txt $ocena $rada))
+        }
+    } catch { }
+
+    # Windows: wersja, data instalacji, aktywacja, klucz
+    try {
+        $txt = $infoOS
+        if ($os.InstallDate) {
+            $lat = [math]::Round(((Get-Date) - $os.InstallDate).TotalDays / 365, 1)
+            $txt = $txt + '; zainstalowany ' + $os.InstallDate.ToString('yyyy-MM-dd') + ' (ok. ' + $lat + ' lat temu)'
+        }
+        [void]$wyniki.Add((Wynik-Sprawdzenia 'Windows' $txt 'INFO' ''))
+    } catch { }
+    try {
+        $lic = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" -ErrorAction Stop)
+        $akt = @($lic | Where-Object { $_.LicenseStatus -eq 1 })
+        if ($akt.Count -gt 0) {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Aktywacja Windows' ('aktywowany (' + [string]$akt[0].ProductKeyChannel + ')') 'OK' ''))
+        } else {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Aktywacja Windows' 'NIEAKTYWOWANY' 'ŹLE' 'Windows wymaga aktywacji (Ustawienia > System > Aktywacja).'))
+        }
+    } catch { }
+    try {
+        $klucz = [string](Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop).OA3xOriginalProductKey
+        if ($klucz.Length -ge 5) {
+            $stan.KluczWindows = $klucz
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Klucz Windows w BIOS/UEFI' ('XXXXX-XXXXX-XXXXX-XXXXX-' + $klucz.Substring($klucz.Length - 5)) 'INFO' 'Pełny klucz: przycisk "Kopiuj klucz Windows".'))
+        } else {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Klucz Windows w BIOS/UEFI' 'brak (komputer składany albo licencja cyfrowa)' 'INFO' 'Przy licencji cyfrowej Windows aktywuje się sam po reinstalacji.'))
+        }
+    } catch { }
+
+    # Czas uruchamiania
+    try {
+        $cz = Podsumuj-CzasStartu @(Pobierz-CzasyStartu) (Poczatek-Serwisu)
+        $stan.CzasStartu = $cz
+        if ($cz) {
+            $txt = 'ostatnio ' + $cz.Ostatni + ' s (' + $cz.Kiedy.ToString('yyyy-MM-dd HH:mm') + '), średnio ' + $cz.Srednio + ' s'
+            if ($null -ne $cz.Przed -and $null -ne $cz.Po) { $txt = $txt + '; przed serwisem ' + $cz.Przed + ' s, po serwisie ' + $cz.Po + ' s' }
+            if ($cz.Ostatni -gt 90) { $o = 'UWAGA'; $r = 'Długie uruchamianie - warto ograniczyć programy startowe; dysk SSD przyspieszy start.' }
+            elseif ($cz.Ostatni -gt 45) { $o = 'INFO'; $r = 'Start mógłby być szybszy - warto ograniczyć programy startowe.' }
+            else { $o = 'OK'; $r = '' }
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Czas uruchamiania Windows' $txt $o $r))
+        }
+    } catch {
+        [void]$wyniki.Add((Wynik-Sprawdzenia 'Czas uruchamiania Windows' 'brak danych (potrzebne uprawnienia administratora)' 'INFO' ''))
+    }
+
+    # Urzadzenia z problemami
+    try {
+        $problemy = @(Get-CimInstance -ClassName Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' -ErrorAction Stop |
+            Where-Object { @(22, 24, 45) -notcontains [int]$_.ConfigManagerErrorCode })
+        if ($problemy.Count -eq 0) {
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Sterowniki urządzeń' 'wszystkie urządzenia działają' 'OK' ''))
+        }
+        foreach ($u in @($problemy | Select-Object -First 10)) {
+            $n = [string]$u.Name
+            if (-not $n) { $n = 'Nieznane urządzenie' }
+            [void]$wyniki.Add((Wynik-Sprawdzenia 'Urządzenie z problemem' ($n + ' - ' + (Opis-BleduUrzadzenia $u.ConfigManagerErrorCode)) 'ŹLE' 'Brak lub błąd sterownika - do zainstalowania ze strony producenta albo z Windows Update.'))
+        }
+    } catch { }
+
+    $wyniki
+}
+
+# =====================================================================
+#  FUNKCJE: APLIKACJE ZE SKLEPU
+# =====================================================================
+function Pasuje-Do([string]$nazwa, $wzorce) {
+    foreach ($w in $wzorce) { if ($nazwa -like $w) { return $true } }
+    $false
+}
+
+function Pobierz-Aplikacje {
+    $zainstalowane = @()
+    try {
+        if ($czyAdmin) { $zainstalowane = @(Get-AppxPackage -AllUsers -ErrorAction Stop) }
+        else { $zainstalowane = @(Get-AppxPackage -ErrorAction Stop) }
+    } catch {
+        try { $zainstalowane = @(Get-AppxPackage -ErrorAction Stop) } catch { Log ('Nie udało się pobrać listy aplikacji: ' + $_.Exception.Message) }
+    }
+    $prov = @()
+    if ($czyAdmin) { try { $prov = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop) } catch { } }
+    foreach ($a in $listaAplikacji) {
+        $znalezione = @($zainstalowane | Where-Object { Pasuje-Do $_.Name $a.Wzorce })
+        $znalezioneProv = @($prov | Where-Object { Pasuje-Do $_.DisplayName $a.Wzorce })
+        if ($znalezione.Count -eq 0 -and $znalezioneProv.Count -eq 0) { continue }
+        $nazwy = @(@($znalezione | ForEach-Object { $_.Name }) + @($znalezioneProv | ForEach-Object { $_.DisplayName }) | Sort-Object -Unique)
+        [pscustomobject]@{ Aplikacja = $a; Etykieta = $a.Etykieta; Rodzaj = $a.Rodzaj; Kategoria = $a.Kategoria
+            Pakiety = $znalezione; Prov = $znalezioneProv; Nazwy = ($nazwy -join ', ') }
+    }
+}
+
+function Usun-Aplikacje($element) {
+    $bledy = 0
+    foreach ($p in @($element.Pakiety | Sort-Object -Property PackageFullName -Unique)) {
+        [System.Windows.Forms.Application]::DoEvents()
+        try { Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop }
+        catch {
+            try { Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop }
+            catch { $bledy++; Log ('  ' + $p.Name + ': ' + $_.Exception.Message) }
+        }
+    }
+    foreach ($p in @($element.Prov)) {
+        try { Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop | Out-Null }
+        catch { Log ('  (dla nowych kont) ' + $p.DisplayName + ': ' + $_.Exception.Message) }
+    }
+    ($bledy -eq 0)
+}
+
+# =====================================================================
+#  FUNKCJE: INSTALACJA PRZEZ WINGET
+# =====================================================================
+function Sciezka-Winget {
+    $c = Get-Command -Name 'winget.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Path }
+    $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    $d = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe') -ErrorAction SilentlyContinue |
+        Sort-Object -Property FullName -Descending)
+    if ($d.Count -gt 0) { return $d[0].FullName }
+    $null
+}
+
+function Pobierz-ZainstalowaneWinget([string]$winget) {
+    $plik = Join-Path $env:TEMP ('winget_' + [guid]::NewGuid().ToString('N') + '.json')
+    [void](Uruchom-Program ('"' + $winget + '" export -o "' + $plik + '" --accept-source-agreements') 'sprawdzanie programów')
+    $ids = @()
+    if (Test-Path -LiteralPath $plik) {
+        try {
+            $j = Get-Content -LiteralPath $plik -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ids = @($j.Sources | ForEach-Object { $_.Packages } | ForEach-Object { [string]$_.PackageIdentifier })
+        } catch { }
+        Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    }
+    $ids
+}
+
+function Opis-KoduWinget([int]$kod, [string]$tekst) {
+    if ($kod -eq 0) { return 'OK' }
+    if ($kod -eq -1978335135 -or $kod -eq -1978335189) { return 'już zainstalowany' }
+    if ($kod -eq -1978335212) { return 'nie znaleziono w repozytorium' }
+    'błąd (kod ' + $kod + ') ' + (@(Ostatnie-Linie $tekst 1) -join ' ')
+}
+
+function Zainstaluj-Program([string]$winget, $program) {
+    $w = Uruchom-Program ('"' + $winget + '" install --id "' + $program.Id + '" -e --source winget --silent --accept-package-agreements --accept-source-agreements') ('instalacja ' + $program.Etykieta)
+    Opis-KoduWinget $w.Kod $w.Tekst
+}
+
+# =====================================================================
+#  FUNKCJE: PROGRAMY I FOLDERY
+# =====================================================================
+function Lista-Programow {
+    $klucze = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*')
+    $lista = foreach ($k in $klucze) {
+        Get-ItemProperty -Path $k -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.SystemComponent -ne 1 -and -not $_.ParentKeyName }
+    }
+    @($lista | ForEach-Object {
+        [pscustomobject]@{ Nazwa = ([string]$_.DisplayName).Trim(); Wersja = [string]$_.DisplayVersion; Wydawca = [string]$_.Publisher }
+    } | Sort-Object -Property Nazwa -Unique)
+}
+
+function Rozmiar-Folderu([string]$sciezka) {
+    if (-not $sciezka -or -not (Test-Path -LiteralPath $sciezka)) { return [long]0 }
+    $s = (Get-ChildItem -LiteralPath $sciezka -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    if ($s) { [long]$s } else { [long]0 }
+}
+
+# =====================================================================
+#  RAPORT DLA KLIENTA (HTML, do wydruku albo zapisu jako PDF)
+# =====================================================================
+$naglowkiPrac = [ordered]@{
+    'Usługi'         = 'Usługi systemowe'
+    'Autostart'      = 'Programy uruchamiane razem z Windows'
+    'Programy'       = 'Programy w tle'
+    'Aplikacje'      = 'Usunięte zbędne aplikacje'
+    'Ustawienia'     = 'Ustawienia Windows'
+    'Czyszczenie'    = 'Czyszczenie dysku'
+    'Naprawy'        = 'Naprawy systemu'
+    'Instalacja'     = 'Programy zainstalowane i zaktualizowane'
+    'Bezpieczeństwo' = 'Zabezpieczenia'
+    'Kopia'          = 'Kopia zapasowa przed reinstalacją'
+}
+
+function Etykieta-Oceny([string]$ocena) {
+    switch ($ocena) {
+        'ŹLE'   { '<span class="ocena zle">Do naprawy</span>' }
+        'UWAGA' { '<span class="ocena uwaga">Do poprawy</span>' }
+        'OK'    { '<span class="ocena ok">W porządku</span>' }
+        default { '<span class="ocena info">Informacja</span>' }
+    }
+}
+
+function Zbuduj-Raport($d) {
+    $css = @'
+*{box-sizing:border-box}
+body{margin:0;background:#f3f4f6;font-family:"Segoe UI",Arial,sans-serif;color:#1f2937;font-size:14px;line-height:1.5}
+.strona{max-width:860px;margin:24px auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.naglowek{background:#111827;color:#fff;padding:28px 36px 22px;border-bottom:5px solid #ff7a1a;display:flex;justify-content:space-between;align-items:flex-end;gap:16px}
+.marka{font-size:26px;font-weight:700;letter-spacing:.2px}
+.marka span{color:#ff7a1a}
+.podtytul{color:#d1d5db;margin-top:4px}
+.kontakt{text-align:right;color:#d1d5db;font-size:13px}
+.kontakt b{color:#fff;font-size:17px}
+.tresc{padding:26px 36px 10px}
+h2{font-size:17px;margin:26px 0 10px;padding-bottom:6px;border-bottom:2px solid #f3f4f6;color:#111827}
+h3{font-size:14px;margin:14px 0 4px;color:#374151}
+.kafelki{display:flex;gap:12px;flex-wrap:wrap}
+.kafel{flex:1 1 160px;border:1px solid #e5e7eb;border-top:4px solid #ff7a1a;border-radius:6px;padding:12px 14px}
+.kafel .liczba{font-size:24px;font-weight:700;color:#111827}
+.kafel .opis{color:#6b7280;font-size:12px}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:7px 8px;border-bottom:1px solid #f3f4f6;vertical-align:top}
+th{width:34%;color:#6b7280;font-weight:600}
+ul{margin:4px 0 8px;padding-left:20px}
+li{margin:2px 0}
+.ocena{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap}
+.zle{background:#fee2e2;color:#b91c1c}.uwaga{background:#ffedd5;color:#c2410c}.ok{background:#dcfce7;color:#15803d}.info{background:#dbeafe;color:#1d4ed8}
+.zalecenie{border-left:4px solid #c2410c;background:#fff7ed;padding:8px 12px;margin:8px 0;border-radius:0 6px 6px 0}
+.zalecenie.pilne{border-left-color:#b91c1c;background:#fef2f2}
+.stopka{background:#fff7ed;padding:20px 36px;display:flex;gap:20px;align-items:center;justify-content:space-between;border-top:1px solid #fed7aa}
+.qr svg{width:120px;height:120px;display:block}
+.drukuj{position:fixed;right:20px;bottom:20px;background:#ff7a1a;color:#111827;border:0;padding:12px 18px;border-radius:6px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+@media print{body{background:#fff}.strona{box-shadow:none;margin:0;max-width:none}.drukuj{display:none}h2{break-after:avoid}.kafel,.zalecenie,tr{break-inside:avoid}}
+'@
+    $sb = New-Object System.Text.StringBuilder
+    function Dodaj([string]$tekst) { [void]$sb.Append($tekst) }
+
+    Dodaj ('<!DOCTYPE html><html lang="pl"><head><meta charset="utf-8"><title>Raport serwisowy - ' + (Html $d.Komputer) + '</title><style>' + $css + '</style></head><body>')
+    Dodaj '<button class="drukuj" onclick="window.print()">Drukuj / zapisz jako PDF</button><div class="strona">'
+
+    # naglowek
+    $nazwa = Html $d.NazwaSerwisu
+    $slowa = $nazwa.Split(' ')
+    if ($slowa.Count -gt 1) { $nazwa = ($slowa[0..($slowa.Count - 2)] -join ' ') + ' <span>' + $slowa[-1] + '</span>' }
+    Dodaj ('<div class="naglowek"><div><div class="marka">' + $nazwa + '</div><div class="podtytul">Raport z serwisu komputera &middot; ' + (Html $d.Data) + '</div></div>')
+    Dodaj '<div class="kontakt">'
+    if ($d.Telefon) { Dodaj ('W razie pytań:<br><b>tel. ' + (Html $d.Telefon) + '</b>') }
+    Dodaj '</div></div><div class="tresc">'
+
+    # kafelki z liczbami
+    $prace = @($d.Prace)
+    $zwolniono = [long]0
+    foreach ($p in $prace) { if ($p.Rodzaj -eq 'Czyszczenie') { $zwolniono += [long]$p.Wartosc } }
+    $uslugi = @($prace | Where-Object { $_.Rodzaj -eq 'Usługi' -and $_.Opis -like 'Wyłączony:*' }).Count
+    $aplikacje = @($prace | Where-Object { $_.Rodzaj -eq 'Aplikacje' }).Count
+    $kafelki = New-Object System.Collections.ArrayList
+    if ($zwolniono -gt 0) { [void]$kafelki.Add(@((Tekst-Rozmiaru $zwolniono), 'odzyskane miejsce na dysku')) }
+    if ($uslugi -gt 0) { [void]$kafelki.Add(@([string]$uslugi, 'wyłączone zbędne usługi')) }
+    if ($aplikacje -gt 0) { [void]$kafelki.Add(@([string]$aplikacje, 'usunięte zbędne aplikacje')) }
+    $cz = $d.CzasStartu
+    if ($cz -and $null -ne $cz.Przed -and $null -ne $cz.Po) {
+        [void]$kafelki.Add(@(([string]$cz.Przed + ' s &rarr; ' + $cz.Po + ' s'), 'czas uruchamiania: przed i po serwisie'))
+    } elseif ($cz) {
+        [void]$kafelki.Add(@(([string]$cz.Ostatni + ' s'), 'czas uruchamiania Windows'))
+    }
+    if ($kafelki.Count -gt 0) {
+        Dodaj '<div class="kafelki">'
+        foreach ($k in $kafelki) { Dodaj ('<div class="kafel"><div class="liczba">' + $k[0] + '</div><div class="opis">' + $k[1] + '</div></div>') }
+        Dodaj '</div>'
+    }
+
+    # komputer
+    $wybrane = @($d.Sprzet | Where-Object { $_.Nazwa -match '^(Komputer|Procesor|Pamięć RAM|Dysk|Karta graficzna|Bateria|Windows|Aktywacja)' })
+    Dodaj ('<h2>Komputer ' + (Html $d.Komputer) + '</h2><table>')
+    if ($wybrane.Count -eq 0 -and $d.System) { Dodaj ('<tr><th>System</th><td>' + (Html $d.System) + '</td></tr>') }
+    foreach ($w in $wybrane) { Dodaj ('<tr><th>' + (Html $w.Nazwa) + '</th><td>' + (Html $w.Wynik) + '</td></tr>') }
+    Dodaj '</table>'
+
+    # wykonane prace
+    Dodaj '<h2>Wykonane prace</h2>'
+    if ($prace.Count -eq 0) {
+        Dodaj '<p>Przegląd i diagnostyka komputera: sprzęt, dyski, zabezpieczenia i ustawienia systemu.</p>'
+    } else {
+        foreach ($rodzaj in $naglowkiPrac.Keys) {
+            $grupa = @($prace | Where-Object { $_.Rodzaj -eq $rodzaj })
+            if ($grupa.Count -eq 0) { continue }
+            Dodaj ('<h3>' + (Html $naglowkiPrac[$rodzaj]) + '</h3><ul>')
+            foreach ($p in ($grupa | Select-Object -Property Opis -Unique)) { Dodaj ('<li>' + (Html $p.Opis) + '</li>') }
+            Dodaj '</ul>'
+        }
+    }
+
+    # zalecenia
+    $zalecenia = @(@($d.Sprzet) + @($d.Bezpieczenstwo) | Where-Object { $_ -and ($_.Ocena -eq 'ŹLE' -or $_.Ocena -eq 'UWAGA') -and $_.Rada } | Sort-Object -Property Waga)
+    Dodaj '<h2>Zalecenia</h2>'
+    if ($zalecenia.Count -eq 0) {
+        Dodaj '<p>Komputer jest w dobrym stanie. Warto co jakiś czas instalować aktualizacje Windows i robić kopię ważnych plików.</p>'
+    } else {
+        foreach ($z in $zalecenia) {
+            $klasa = 'zalecenie'
+            if ($z.Ocena -eq 'ŹLE') { $klasa = 'zalecenie pilne' }
+            Dodaj ('<div class="' + $klasa + '"><b>' + (Html $z.Nazwa) + ':</b> ' + (Html $z.Rada) + '</div>')
+        }
+    }
+
+    # zabezpieczenia
+    if (@($d.Bezpieczenstwo).Count -gt 0) {
+        Dodaj '<h2>Stan zabezpieczeń</h2><table>'
+        foreach ($b in $d.Bezpieczenstwo) {
+            Dodaj ('<tr><th>' + (Html $b.Nazwa) + '</th><td>' + (Html $b.Wynik) + '</td><td style="width:110px">' + (Etykieta-Oceny $b.Ocena) + '</td></tr>')
+        }
+        Dodaj '</table>'
+    }
+
+    Dodaj '</div><div class="stopka"><div>'
+    Dodaj ('<b>Dziękujemy za skorzystanie z usług ' + (Html $d.NazwaSerwisu) + '!</b><br>')
+    if ($d.Telefon) { Dodaj ('W razie problemów zadzwoń: <b>' + (Html $d.Telefon) + '</b><br>') }
+    if ($d.LinkOpinii) {
+        Dodaj ('Jeśli jesteś zadowolony, zostaw nam opinię w Google - bardzo nam pomaga.<br><a href="' + (Html $d.LinkOpinii) + '">' + (Html $d.LinkOpinii) + '</a>')
+    }
+    Dodaj '</div>'
+    if ($d.Qr) { Dodaj ('<div class="qr">' + $d.Qr + '</div>') }
+    Dodaj '</div></div></body></html>'
+    $sb.ToString()
+}
+
+function Zapisz-Raport {
+    Zajety $true
+    try {
+        if (@($stan.Sprzet).Count -eq 0) { Log 'Sprawdzam sprzęt do raportu...'; $stan.Sprzet = @(Sprawdz-Sprzet) }
+        if (@($stan.Bezpieczenstwo).Count -eq 0) { Log 'Sprawdzam zabezpieczenia do raportu...'; $stan.Bezpieczenstwo = @(Sprawdz-Bezpieczenstwo | Sort-Object -Property Waga) }
+        $dane = [pscustomobject]@{
+            NazwaSerwisu = $NazwaSerwisu; Telefon = $TelefonSerwisu; LinkOpinii = $LinkOpinii; Qr = $QrOpinii
+            Komputer = $env:COMPUTERNAME; System = $infoOS; Data = (Get-Date -Format 'dd.MM.yyyy')
+            Prace = @(Prace-Serwisu); Sprzet = @($stan.Sprzet); Bezpieczenstwo = @($stan.Bezpieczenstwo); CzasStartu = $stan.CzasStartu
+        }
+        $html = Zbuduj-Raport $dane
+        $plik = Join-Path ([Environment]::GetFolderPath('Desktop')) ('Raport_serwisowy_{0}_{1:yyyyMMdd_HHmm}.html' -f $env:COMPUTERNAME, (Get-Date))
+        [IO.File]::WriteAllText($plik, $html, (New-Object System.Text.UTF8Encoding($true)))
+        Log ('Raport dla klienta zapisany na pulpicie: ' + $plik)
+        Start-Process -FilePath $plik
+    } catch {
+        Log ('BŁĄD raportu: ' + $_.Exception.Message)
+    } finally {
+        Zajety $false
+    }
 }
 
 # =====================================================================
@@ -834,52 +1969,84 @@ try {
     $infoOS = $infoOS + ' (kompilacja ' + $os.BuildNumber + ')'
 } catch { }
 
+# dopasowanie do ekranu (laptopy 1366x768 tez sie mieszcza)
+$obszar = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$szerokoscOkna = [math]::Min(1280, $obszar.Width - 10)
+$wysokoscOkna = [math]::Min(860, $obszar.Height - 10)
+$malyEkran = ($obszar.Height -lt 820)
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Narzędzia serwisowe Windows ' + $WersjaNarzedzia + ' - ' + $env:COMPUTERNAME
-$form.Size = New-Object System.Drawing.Size(1220, 840)
-$form.MinimumSize = New-Object System.Drawing.Size(980, 640)
+$form.Size = New-Object System.Drawing.Size($szerokoscOkna, $wysokoscOkna)
+$form.MinimumSize = New-Object System.Drawing.Size([math]::Min(960, $szerokoscOkna), [math]::Min(600, $wysokoscOkna))
 $form.StartPosition = 'CenterScreen'
 $form.Font = $czcionka
 $form.BackColor = $kolorTlo
+if ($malyEkran) { $form.WindowState = 'Maximized' }
 
 # ---------- baner ----------
 $baner = New-Object System.Windows.Forms.Panel
 $baner.Dock = 'Top'
-$baner.Height = 70
+$baner.Height = 74
 $baner.BackColor = $kolorCiemny
 
+$banerLewy = New-Object System.Windows.Forms.Panel
+$banerLewy.Dock = 'Fill'
+$banerLewy.BackColor = $kolorCiemny
+$banerLewy.Padding = New-Object System.Windows.Forms.Padding(18, 8, 8, 0)
+
 $banerTytul = New-Object System.Windows.Forms.Label
-$banerTytul.Text = 'Narzędzia serwisowe Windows'
-$banerTytul.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16)
+$tekstTytulu = $NazwaSerwisu + '  ·  narzędzia serwisowe ' + $WersjaNarzedzia
+if ($TelefonSerwisu) { $tekstTytulu = $tekstTytulu + '  ·  tel. ' + $TelefonSerwisu }
+$banerTytul.Text = $tekstTytulu
+$banerTytul.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
 $banerTytul.ForeColor = [System.Drawing.Color]::White
-$banerTytul.AutoSize = $true
-$banerTytul.Location = New-Object System.Drawing.Point(18, 8)
-$baner.Controls.Add($banerTytul)
+$banerTytul.Dock = 'Top'
+$banerTytul.Height = 34
+$banerTytul.AutoEllipsis = $true
 
 $banerInfo = New-Object System.Windows.Forms.Label
 $tekstUprawnien = 'administrator'
 if (-not $czyAdmin) { $tekstUprawnien = 'TRYB PODGLĄDU - zmiany wyłączone' }
 $banerInfo.Text = 'Komputer: ' + $env:COMPUTERNAME + '     ' + $infoOS + '     Uprawnienia: ' + $tekstUprawnien
 $banerInfo.ForeColor = [System.Drawing.Color]::FromArgb(209, 213, 219)
-$banerInfo.AutoSize = $true
-$banerInfo.Location = New-Object System.Drawing.Point(21, 42)
-$baner.Controls.Add($banerInfo)
+$banerInfo.Dock = 'Top'
+$banerInfo.Height = 22
+$banerInfo.AutoEllipsis = $true
+$banerLewy.Controls.Add($banerInfo)
+$banerLewy.Controls.Add($banerTytul)
+
+$banerPrawy = New-Object System.Windows.Forms.FlowLayoutPanel
+$banerPrawy.Dock = 'Right'
+$banerPrawy.AutoSize = $true
+$banerPrawy.AutoSizeMode = 'GrowAndShrink'
+$banerPrawy.WrapContents = $false
+$banerPrawy.BackColor = $kolorCiemny
+$banerPrawy.Padding = New-Object System.Windows.Forms.Padding(0, 16, 12, 0)
+$btnEkspres = Nowy-Przycisk $banerPrawy 'Serwis ekspresowy' $true
+$btnRaport  = Nowy-Przycisk $banerPrawy 'Raport dla klienta' $false
+$btnPomoc   = Nowy-Przycisk $banerPrawy 'Pomoc zdalna' $false
 
 $banerPasek = New-Object System.Windows.Forms.Panel
 $banerPasek.Dock = 'Bottom'
 $banerPasek.Height = 3
 $banerPasek.BackColor = $kolorAkcent
+
+$baner.Controls.Add($banerLewy)
+$baner.Controls.Add($banerPrawy)
 $baner.Controls.Add($banerPasek)
 
 # ---------- zakladki, dziennik, pasek stanu ----------
 $zakladki = New-Object System.Windows.Forms.TabControl
 $zakladki.Dock = 'Fill'
-$zakladki.Font = New-Object System.Drawing.Font('Segoe UI', 10.5)
-$zakladki.Padding = New-Object System.Drawing.Point(18, 6)
+$zakladki.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$zakladki.Padding = New-Object System.Drawing.Point(10, 5)
+if ($szerokoscOkna -lt 1150) { $zakladki.Multiline = $true }
 
 $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Dock = 'Bottom'
 $logBox.Height = 130
+if ($malyEkran) { $logBox.Height = 86 }
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = 'Vertical'
@@ -964,6 +2131,46 @@ $btnPOdblokuj = Nowy-Przycisk $panelP 'Przywróć aplikacje w tle' $false
 $tabProgramy = Nowa-Zakladka 'Programy w tle' $siatkaP ('Programy działające teraz (bez procesów systemowych), od zajmujących najwięcej pamięci. "Ma okno: nie" = działa w tle. ' +
     'Zamknięcie jest jednorazowe; żeby program nie wracał, wyłącz go w zakładce Autostart.') $panelP
 
+# ---------- Aplikacje ----------
+$siatkaAp = Nowa-Siatka
+Dodaj-Kolumne $siatkaAp 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaAp 'Text' 'Aplikacja' 240 ''
+Dodaj-Kolumne $siatkaAp 'Text' 'Kategoria' 120 ''
+Dodaj-Kolumne $siatkaAp 'Text' 'Co to jest' 0 ''
+Dodaj-Kolumne $siatkaAp 'Text' 'Rodzaj' 100 ''
+Dodaj-Kolumne $siatkaAp 'Text' 'Pakiety w systemie' 230 ''
+
+$panelAp = Nowy-PanelPrzyciskow
+[void](Nowa-Etykieta $panelAp 'Pakiet:' 4)
+$cmbPakietAp = Nowa-Lista $panelAp 300 ([string[]]$pakietyAplikacji.Keys)
+$btnPakietAp = Nowy-Przycisk $panelAp 'Zaznacz pakiet' $false
+$panelAp.SetFlowBreak($btnPakietAp, $true)
+$btnApUsun     = Nowy-Przycisk $panelAp 'Usuń zaznaczone' $true
+$btnApOdznacz  = Nowy-Przycisk $panelAp 'Odznacz wszystko' $false
+$btnApOdswiez  = Nowy-Przycisk $panelAp 'Odśwież' $false
+
+$tabAplikacje = Nowa-Zakladka 'Aplikacje' $siatkaAp ('Aplikacje dorzucane do Windows - widać tylko te, które są na tym komputerze. Zielone = zwykle nikt ich nie używa, ' +
+    'pomarańczowe = zapytaj klienta. Usunięte aplikacje znikają też dla nowych kont; w razie potrzeby można je zainstalować ze Sklepu Microsoft.') $panelAp
+
+# ---------- Ustawienia ----------
+$siatkaUs = Nowa-Siatka
+Dodaj-Kolumne $siatkaUs 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaUs 'Text' 'Ustawienie' 270 ''
+Dodaj-Kolumne $siatkaUs 'Text' 'Co daje' 0 ''
+Dodaj-Kolumne $siatkaUs 'Text' 'Rodzaj' 100 ''
+Dodaj-Kolumne $siatkaUs 'Text' 'Stan' 150 ''
+
+$panelUs = Nowy-PanelPrzyciskow
+$btnUsZastosuj = Nowy-Przycisk $panelUs 'Zastosuj zaznaczone' $true
+$btnUsCofnij   = Nowy-Przycisk $panelUs 'Przywróć domyślne zaznaczonych' $false
+$btnUsZalecane = Nowy-Przycisk $panelUs 'Zaznacz zalecane' $false
+$btnUsOdznacz  = Nowy-Przycisk $panelUs 'Odznacz wszystko' $false
+$btnUsOdswiez  = Nowy-Przycisk $panelUs 'Odśwież' $false
+$btnUsExplorer = Nowy-Przycisk $panelUs 'Restart Eksploratora' $false
+
+$tabUstawienia = Nowa-Zakladka 'Ustawienia' $siatkaUs ('Ustawienia Windows z możliwością cofnięcia. Dotyczą konta, na którym działa program, i całego komputera. ' +
+    'Część z nich to zasady, więc w Ustawieniach Windows może się pojawić napis "Niektórymi ustawieniami zarządza organizacja" - to normalne.') $panelUs
+
 # ---------- Czyszczenie ----------
 $siatkaC = Nowa-Siatka
 Dodaj-Kolumne $siatkaC 'Check' 'Wybierz' 64 ''
@@ -976,9 +2183,66 @@ $btnWyczysc     = Nowy-Przycisk $panelC 'Wyczyść zaznaczone' $true
 $btnCBezpieczne = Nowy-Przycisk $panelC 'Zaznacz bezpieczne' $false
 $btnOdznaczC    = Nowy-Przycisk $panelC 'Odznacz wszystko' $false
 $btnPrzelicz    = Nowy-Przycisk $panelC 'Przelicz rozmiar' $false
+$btnFoldery     = Nowy-Przycisk $panelC 'Największe foldery...' $false
 
 $tabCzyszczenie = Nowa-Zakladka 'Czyszczenie' $siatkaC ('Zaznacz, co usunąć, i kliknij "Wyczyść zaznaczone". Pliki w użyciu są pomijane, więc nic się nie zepsuje. ' +
-    '"Zaznacz bezpieczne" wybiera pliki tymczasowe, cache aktualizacji i raporty błędów. Kosz, przeglądarki, zrzuty pamięci i DISM wybierasz sam.') $panelC
+    '"Zaznacz bezpieczne" wybiera pliki tymczasowe, cache aktualizacji i raporty błędów. "Największe foldery" pokazuje, co zajmuje miejsce.') $panelC
+
+# ---------- Naprawy ----------
+$siatkaN = Nowa-Siatka
+Dodaj-Kolumne $siatkaN 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaN 'Text' 'Naprawa' 240 ''
+Dodaj-Kolumne $siatkaN 'Text' 'Kiedy pomaga / co robi' 0 ''
+Dodaj-Kolumne $siatkaN 'Text' 'Czas' 95 ''
+Dodaj-Kolumne $siatkaN 'Text' 'Restart' 80 ''
+Dodaj-Kolumne $siatkaN 'Text' 'Wynik' 250 ''
+
+$panelN = Nowy-PanelPrzyciskow
+$btnNUruchom  = Nowy-Przycisk $panelN 'Uruchom zaznaczone' $true
+$btnNOdznacz  = Nowy-Przycisk $panelN 'Odznacz wszystko' $false
+$btnNRestart  = Nowy-Przycisk $panelN 'Uruchom ponownie komputer' $false
+
+$tabNaprawy = Nowa-Zakladka 'Naprawy' $siatkaN ('Typowe naprawy Windows. Zaznacz i kliknij "Uruchom zaznaczone" - wykonają się po kolei, a wynik pojawi się w ostatniej kolumnie. ' +
+    'Przy uszkodzonym systemie: najpierw DISM, potem SFC. Okno w tym czasie działa, postęp widać w dzienniku na dole.') $panelN
+
+# ---------- Instalacja ----------
+$siatkaI = Nowa-Siatka
+Dodaj-Kolumne $siatkaI 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaI 'Text' 'Program' 230 ''
+Dodaj-Kolumne $siatkaI 'Text' 'Kategoria' 120 ''
+Dodaj-Kolumne $siatkaI 'Text' 'Opis' 0 ''
+Dodaj-Kolumne $siatkaI 'Text' 'Stan' 170 ''
+
+$panelI = Nowy-PanelPrzyciskow
+[void](Nowa-Etykieta $panelI 'Pakiet:' 4)
+$cmbPakietI = Nowa-Lista $panelI 260 ([string[]]$pakietyProgramow.Keys)
+$btnPakietI = Nowy-Przycisk $panelI 'Zaznacz pakiet' $false
+$panelI.SetFlowBreak($btnPakietI, $true)
+$btnIInstaluj  = Nowy-Przycisk $panelI 'Zainstaluj zaznaczone' $true
+$btnIAktualizuj = Nowy-Przycisk $panelI 'Zaktualizuj wszystkie programy' $false
+$btnIOdznacz   = Nowy-Przycisk $panelI 'Odznacz wszystko' $false
+$btnIOdswiez   = Nowy-Przycisk $panelI 'Odśwież' $false
+
+$tabInstalacja = Nowa-Zakladka 'Instalacja' $siatkaI ('Instalacja przez winget - oficjalne repozytorium Microsoft: najnowsze wersje z oficjalnych źródeł, bez dodatków i pasków. ' +
+    'Nic nie jest pobierane, dopóki nie klikniesz "Zainstaluj zaznaczone" albo "Zaktualizuj wszystkie programy".') $panelI
+
+# ---------- Sprzet ----------
+$siatkaS = Nowa-Siatka
+Dodaj-Kolumne $siatkaS 'Text' 'Element' 210 ''
+Dodaj-Kolumne $siatkaS 'Text' 'Wynik' 0 ''
+Dodaj-Kolumne $siatkaS 'Text' 'Ocena' 90 'Waga'
+Dodaj-Kolumne $siatkaS 'Text' 'Co zrobić' 340 ''
+
+$panelS = Nowy-PanelPrzyciskow
+$btnSOdswiez     = Nowy-Przycisk $panelS 'Sprawdź ponownie' $true
+$btnSKlucz       = Nowy-Przycisk $panelS 'Kopiuj klucz Windows' $false
+$btnSBateria     = Nowy-Przycisk $panelS 'Raport baterii' $false
+$btnSPamiec      = Nowy-Przycisk $panelS 'Test pamięci RAM' $false
+$btnSUrzadzenia  = Nowy-Przycisk $panelS 'Menedżer urządzeń' $false
+$btnSSterowniki  = Nowy-Przycisk $panelS 'Opcjonalne sterowniki' $false
+
+$tabSprzet = Nowa-Zakladka 'Sprzęt' $siatkaS ('Stan sprzętu: dyski (zdrowie, zużycie, temperatura), pamięć i wolne sloty, bateria, sterowniki, aktywacja i czas uruchamiania. ' +
+    'Czerwone i pomarańczowe trafią jako zalecenia do raportu dla klienta.') $panelS
 
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
@@ -988,7 +2252,7 @@ Dodaj-Kolumne $siatkaB 'Text' 'Ocena' 90 'Waga'
 Dodaj-Kolumne $siatkaB 'Text' 'Co zrobić' 340 ''
 
 $panelB = Nowy-PanelPrzyciskow
-$btnBRaport     = Nowy-Przycisk $panelB 'Zapisz raport na pulpit' $true
+$btnBRaport     = Nowy-Przycisk $panelB 'Raport dla klienta' $true
 $btnBOdswiez    = Nowy-Przycisk $panelB 'Sprawdź ponownie' $false
 $btnBAktualizuj = Nowy-Przycisk $panelB 'Aktualizuj Defendera' $false
 $btnBSkan       = Nowy-Przycisk $panelB 'Szybkie skanowanie' $false
@@ -997,7 +2261,32 @@ $btnBSmb        = Nowy-Przycisk $panelB 'Wyłącz SMBv1' $false
 $btnBUpdate     = Nowy-Przycisk $panelB 'Windows Update' $false
 
 $tabBezp = Nowa-Zakladka 'Bezpieczeństwo' $siatkaB ('Przegląd zabezpieczeń komputera. Zielone = OK, pomarańczowe = warto poprawić, czerwone = do naprawy, niebieskie = informacja. ' +
-    '"Zapisz raport na pulpit" tworzy plik z wynikami i listą wykonanych prac - możesz go zostawić klientowi.') $panelB
+    '"Raport dla klienta" tworzy na pulpicie stronę z wynikami, wykonanymi pracami i zaleceniami - do wydruku albo zapisania jako PDF.') $panelB
+
+# ---------- Przed reinstalacja ----------
+$siatkaK = Nowa-Siatka
+Dodaj-Kolumne $siatkaK 'Check' 'Wybierz' 64 ''
+Dodaj-Kolumne $siatkaK 'Text' 'Co skopiować' 260 ''
+Dodaj-Kolumne $siatkaK 'Text' 'Opis' 0 ''
+Dodaj-Kolumne $siatkaK 'Text' 'Rozmiar' 115 'Bajty'
+
+$panelK = Nowy-PanelPrzyciskow
+[void](Nowa-Etykieta $panelK 'Zapisz do:' 4)
+$lblCelKopii = Nowa-Etykieta $panelK '(nie wybrano - kliknij "Wybierz folder")' 2
+$lblCelKopii.ForeColor = $kolorTekst
+$lblCelKopii.Font = $czcionkaGruba
+$btnKWybierz = Nowy-Przycisk $panelK 'Wybierz folder...' $false
+$panelK.SetFlowBreak($btnKWybierz, $true)
+$btnKWykonaj   = Nowy-Przycisk $panelK 'Wykonaj kopię zaznaczonych' $true
+$btnKWszystko  = Nowy-Przycisk $panelK 'Zaznacz wszystko' $false
+$btnKOdznacz   = Nowy-Przycisk $panelK 'Odznacz wszystko' $false
+$btnKPrzelicz  = Nowy-Przycisk $panelK 'Przelicz rozmiar' $false
+$btnKOtworz    = Nowy-Przycisk $panelK 'Otwórz folder kopii' $false
+
+$tabKopia = Nowa-Zakladka 'Przed reinstalacją' $siatkaK ('Przed reinstalacją Windows: wybierz pendrive albo dysk zewnętrzny i kliknij "Wykonaj kopię zaznaczonych". ' +
+    'Wszystko trafi do jednego folderu Kopia_komputer_data. Dane i zakładki dotyczą konta, na którym działa program.') $panelK
+
+if ($malyEkran) { foreach ($t in $zakladki.TabPages) { foreach ($k in $t.Controls) { if ($k -is [System.Windows.Forms.Label]) { $k.Height = 46 } } } }
 
 $form.Controls.Add($zakladki)
 $form.Controls.Add($logBox)
@@ -1079,6 +2368,35 @@ $btnOdznaczU.Add_Click({ Odznacz-Wszystko $siatkaU })
 
 $btnFolder.Add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$folderKopii`"" })
 
+function Zastosuj-Uslugi($wybrane, [string]$typ, [string]$nazwaTrybu) {
+    Utworz-PunktPrzywracania 'Przed zmiana uslug'
+    $dane = @(foreach ($u in $wybrane) {
+        $si = Get-StartInfo $u.Nazwa
+        $svc = Get-Service -Name $u.Nazwa -ErrorAction SilentlyContinue
+        [pscustomobject]@{ Nazwa = $u.Nazwa; Start = $si.Start; Delayed = $si.Delayed; Stan = [string]$svc.Status; Etykieta = $u.Etykieta }
+    })
+    $plikKopii = Join-Path $folderKopii ('uslugi_{0:yyyyMMdd_HHmmss}.csv' -f (Get-Date))
+    $dane | Export-Csv -LiteralPath $plikKopii -NoTypeInformation -Encoding UTF8
+    Log ('Kopia ustawień: ' + $plikKopii)
+    $ok = 0; $bledy = 0
+    foreach ($d in $dane) {
+        $w = Ustaw-Start $d.Nazwa $typ
+        if ($w.Ok) {
+            if ($typ -eq 'disabled' -and $d.Stan -eq 'Running') {
+                Stop-Service -Name $d.Nazwa -Force -ErrorAction SilentlyContinue
+            }
+            Log ('Usługa ustawiona na ' + $nazwaTrybu + ': ' + $d.Nazwa)
+            Zapisz-Prace 'Usługi' ($nazwaTrybu + ': ' + $d.Etykieta)
+            $ok++
+        } else {
+            Log ('BŁĄD: ' + $d.Nazwa + ': ' + $w.Komunikat)
+            $bledy++
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    Log ('Usługi gotowe. Zmieniono: ' + $ok + ', błędy: ' + $bledy + '. Zalecany restart komputera.')
+}
+
 $btnZastosuj.Add_Click({
     if ($cmbTryb.SelectedIndex -eq 1) { $typ = 'demand'; $kod = 3; $nazwaTrybu = 'Ręczny' }
     else { $typ = 'disabled'; $kod = 4; $nazwaTrybu = 'Wyłączony' }
@@ -1091,40 +2409,8 @@ $btnZastosuj.Add_Click({
     if (-not (Pytanie ('Ustawić ' + $wybrane.Count + ' usług(i) na: ' + $nazwaTrybu + '?' + $NL + $NL + $nazwy))) { return }
 
     Zajety $true
-    try {
-        Log 'Tworzę punkt przywracania (może potrwać do minuty)...'
-        try {
-            Checkpoint-Computer -Description 'Przed zmiana uslug' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop -WarningAction SilentlyContinue
-            Log 'Punkt przywracania gotowy (albo Windows użył tego sprzed mniej niż 24 h).'
-        } catch {
-            Log ('UWAGA: nie udało się utworzyć punktu przywracania: ' + $_.Exception.Message)
-        }
-
-        $dane = @(foreach ($u in $wybrane) {
-            $si = Get-StartInfo $u.Nazwa
-            $svc = Get-Service -Name $u.Nazwa -ErrorAction SilentlyContinue
-            [pscustomobject]@{ Nazwa = $u.Nazwa; Start = $si.Start; Delayed = $si.Delayed; Stan = [string]$svc.Status }
-        })
-        $plikKopii = Join-Path $folderKopii ('uslugi_{0:yyyyMMdd_HHmmss}.csv' -f (Get-Date))
-        $dane | Export-Csv -LiteralPath $plikKopii -NoTypeInformation -Encoding UTF8
-        Log ('Kopia ustawień: ' + $plikKopii)
-
-        $ok = 0; $bledy = 0
-        foreach ($d in $dane) {
-            $w = Ustaw-Start $d.Nazwa $typ
-            if ($w.Ok) {
-                if ($typ -eq 'disabled' -and $d.Stan -eq 'Running') {
-                    Stop-Service -Name $d.Nazwa -Force -ErrorAction SilentlyContinue
-                }
-                Log ('Usługa ustawiona na ' + $nazwaTrybu + ': ' + $d.Nazwa)
-                $ok++
-            } else {
-                Log ('BŁĄD: ' + $d.Nazwa + ': ' + $w.Komunikat)
-                $bledy++
-            }
-        }
-        Log ('Gotowe. Zmieniono: ' + $ok + ', błędy: ' + $bledy + '. Zalecany restart komputera.')
-    } finally {
+    try { Zastosuj-Uslugi $wybrane $typ $nazwaTrybu }
+    finally {
         Zajety $false
         Wypelnij-Uslugi
     }
@@ -1144,6 +2430,7 @@ $btnDomyslne.Add_Click({
                     Start-Service -Name $u.Nazwa -ErrorAction SilentlyContinue
                 }
                 Log ('Przywrócono domyślne (' + $u.Domyslnie + '): ' + $u.Nazwa)
+                Zapisz-Prace 'Usługi' ('Przywrócono domyślne: ' + $u.Etykieta)
             } else {
                 Log ('BŁĄD: ' + $u.Nazwa + ': ' + $w.Komunikat)
             }
@@ -1216,7 +2503,8 @@ function Zmien-Autostart([bool]$wlacz) {
     foreach ($el in $wybrane) {
         try {
             Ustaw-Autostart $el $wlacz
-            if ($wlacz) { Log ('Autostart włączony: ' + $el.Nazwa) } else { Log ('Autostart wyłączony: ' + $el.Nazwa) }
+            if ($wlacz) { Log ('Autostart włączony: ' + $el.Nazwa); Zapisz-Prace 'Autostart' ('Włączono: ' + $el.Nazwa) }
+            else { Log ('Autostart wyłączony: ' + $el.Nazwa); Zapisz-Prace 'Autostart' ('Wyłączono z autostartu: ' + $el.Nazwa) }
         } catch {
             Log ('BŁĄD autostart ' + $el.Nazwa + ': ' + $_.Exception.Message)
         }
@@ -1276,6 +2564,7 @@ $btnPBlokuj.Add_Click({
         if (-not (Test-Path -LiteralPath $kluczPolityki)) { New-Item -Path $kluczPolityki -Force | Out-Null }
         Set-ItemProperty -LiteralPath $kluczPolityki -Name 'LetAppsRunInBackground' -Value 2 -Type DWord
         Log 'Aplikacje ze Sklepu: działanie w tle zablokowane (zadziała po ponownym zalogowaniu).'
+        Zapisz-Prace 'Programy' 'Zablokowano działanie aplikacji ze Sklepu w tle'
     } catch { Log ('BŁĄD: ' + $_.Exception.Message) }
 })
 
@@ -1339,6 +2628,34 @@ $btnCBezpieczne.Add_Click({
 
 $btnOdznaczC.Add_Click({ Odznacz-Wszystko $siatkaC })
 
+function Wyczysc-Pozycje($wybrane) {
+    $zwolniono = [long]0
+    foreach ($p in $wybrane) {
+        Log ('Czyszczę: ' + $p.Etykieta)
+        $maSciezki = (@($p.Sciezki).Count -gt 0)
+        $przed = [long]0
+        if ($maSciezki) { $przed = Rozmiar-Sciezek $p.Sciezki }
+        try {
+            if ($p.Akcja) { [void](& $p.Akcja $p.Sciezki) } else { Usun-Sciezki $p.Sciezki }
+        } catch {
+            Log ('  błąd: ' + $_.Exception.Message)
+        }
+        $roznica = [long]0
+        if ($maSciezki) {
+            $po = Rozmiar-Sciezek $p.Sciezki
+            $roznica = [math]::Max([long]0, $przed - $po)
+            $zwolniono += $roznica
+            Log ('  zwolniono: ' + (Tekst-Rozmiaru $roznica))
+        }
+        $opis = $p.Etykieta
+        if ($roznica -gt 0) { $opis = $opis + ' (' + (Tekst-Rozmiaru $roznica) + ')' }
+        Zapisz-Prace 'Czyszczenie' $opis $roznica
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    Log ('Czyszczenie gotowe. Zwolniono łącznie: ' + (Tekst-Rozmiaru $zwolniono))
+    $zwolniono
+}
+
 $btnWyczysc.Add_Click({
     $wybrane = @(Zaznaczone $siatkaC)
     if ($wybrane.Count -eq 0) { Info 'Zaznacz, co wyczyścić.'; return }
@@ -1348,49 +2665,23 @@ $btnWyczysc.Add_Click({
 
     Zajety $true
     try {
-        $zwolniono = [long]0
-        foreach ($p in $wybrane) {
-            Log ('Czyszczę: ' + $p.Etykieta)
-            $maSciezki = (@($p.Sciezki).Count -gt 0)
-            $przed = [long]0
-            if ($maSciezki) { $przed = Rozmiar-Sciezek $p.Sciezki }
-            try {
-                if ($p.Akcja) { & $p.Akcja $p.Sciezki } else { Usun-Sciezki $p.Sciezki }
-            } catch {
-                Log ('  błąd: ' + $_.Exception.Message)
-            }
-            if ($maSciezki) {
-                $po = Rozmiar-Sciezek $p.Sciezki
-                $roznica = [math]::Max([long]0, $przed - $po)
-                $zwolniono += $roznica
-                Log ('  zwolniono: ' + (Tekst-Rozmiaru $roznica))
-            }
-        }
-        Log ('Czyszczenie gotowe. Zwolniono łącznie: ' + (Tekst-Rozmiaru $zwolniono))
+        [void](Wyczysc-Pozycje $wybrane)
         Przelicz-Rozmiary
     } finally {
         Zajety $false
     }
 })
 
+$btnFoldery.Add_Click({ Pokaz-NajwiekszeFoldery $env:USERPROFILE })
+
 # =====================================================================
 #  LOGIKA: BEZPIECZENSTWO
 # =====================================================================
 function Wypelnij-Bezpieczenstwo {
-    $siatkaB.Rows.Clear()
     Log 'Sprawdzam zabezpieczenia...'
     $wyniki = @(Sprawdz-Bezpieczenstwo | Sort-Object -Property Waga)
     $stan.Bezpieczenstwo = $wyniki
-    foreach ($w in $wyniki) {
-        $idx = $siatkaB.Rows.Add($w.Nazwa, $w.Wynik, $w.Ocena, $w.Rada)
-        $wiersz = $siatkaB.Rows[$idx]
-        $wiersz.Tag = $w
-        $wiersz.Cells[0].Style.Font = $czcionkaGruba
-        $wiersz.Cells[2].Style.ForeColor = Kolor $w.Ocena
-        $wiersz.Cells[2].Style.Font = $czcionkaGruba
-        $wiersz.Cells[3].Style.ForeColor = $kolorSzary
-    }
-    Posortuj-Ponownie $siatkaB
+    Wypelnij-Wyniki $siatkaB $wyniki
     $zle = @($wyniki | Where-Object { $_.Ocena -eq 'ŹLE' }).Count
     $uwagi = @($wyniki | Where-Object { $_.Ocena -eq 'UWAGA' }).Count
     Log ('Bezpieczeństwo: do naprawy ' + $zle + ', do poprawy ' + $uwagi + '.')
@@ -1409,6 +2700,7 @@ $btnBAktualizuj.Add_Click({
         Log 'Aktualizuję bazy Microsoft Defender...'
         Update-MpSignature -ErrorAction Stop
         Log 'Bazy Defendera zaktualizowane.'
+        Zapisz-Prace 'Bezpieczeństwo' 'Zaktualizowano bazy antywirusa Microsoft Defender'
     } catch {
         Log ('BŁĄD aktualizacji Defendera: ' + $_.Exception.Message)
     } finally {
@@ -1424,13 +2716,14 @@ $btnBSkan.Add_Click({
     Zajety $true
     try {
         Log 'Szybkie skanowanie Defenderem (kilka minut)...'
-        $proc = Start-Process -FilePath $mpcmd -ArgumentList '-Scan -ScanType 1' -WindowStyle Hidden -PassThru
-        while (-not $proc.HasExited) {
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 300
+        $w = Uruchom-Program ('"' + $mpcmd + '" -Scan -ScanType 1') 'skanowanie'
+        if ($w.Kod -eq 0) {
+            Log 'Skanowanie zakończone: nic nie znaleziono.'
+            Zapisz-Prace 'Bezpieczeństwo' 'Skanowanie antywirusowe: nie znaleziono zagrożeń'
+        } else {
+            Log ('Skanowanie zakończone, kod: ' + $w.Kod + ' (sprawdź Zabezpieczenia Windows > Historia ochrony).')
+            Zapisz-Prace 'Bezpieczeństwo' 'Skanowanie antywirusowe zakończone z uwagami (szczegóły w Zabezpieczeniach Windows)'
         }
-        if ($proc.ExitCode -eq 0) { Log 'Skanowanie zakończone: nic nie znaleziono.' }
-        else { Log ('Skanowanie zakończone, kod: ' + $proc.ExitCode + ' (sprawdź Zabezpieczenia Windows > Historia ochrony).') }
     } finally {
         Zajety $false
     }
@@ -1441,6 +2734,7 @@ $btnBZapora.Add_Click({
     try {
         Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True -ErrorAction Stop
         Log 'Zapora Windows włączona dla wszystkich profili.'
+        Zapisz-Prace 'Bezpieczeństwo' 'Włączono zaporę Windows'
     } catch { Log ('BŁĄD zapory: ' + $_.Exception.Message) }
     Wypelnij-Bezpieczenstwo
 })
@@ -1450,35 +2744,776 @@ $btnBSmb.Add_Click({
     try {
         Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
         Log 'SMBv1 wyłączony.'
+        Zapisz-Prace 'Bezpieczeństwo' 'Wyłączono przestarzały protokół SMBv1'
     } catch { Log ('BŁĄD SMBv1: ' + $_.Exception.Message) }
     Wypelnij-Bezpieczenstwo
 })
 
 $btnBUpdate.Add_Click({ Start-Process 'ms-settings:windowsupdate' })
 
-$btnBRaport.Add_Click({
-    if (@($stan.Bezpieczenstwo).Count -eq 0) { Wypelnij-Bezpieczenstwo }
-    $linie = New-Object System.Collections.ArrayList
-    [void]$linie.Add('RAPORT SERWISOWY')
-    [void]$linie.Add('Komputer: ' + $env:COMPUTERNAME)
-    [void]$linie.Add('Data: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
-    if ($infoOS) { [void]$linie.Add('System: ' + $infoOS) }
-    [void]$linie.Add('')
-    [void]$linie.Add('ZABEZPIECZENIA')
-    foreach ($w in $stan.Bezpieczenstwo) {
-        $l = ('[{0}] {1}: {2}' -f $w.Ocena, $w.Nazwa, $w.Wynik)
-        if ($w.Rada) { $l = $l + ' -> ' + $w.Rada }
-        [void]$linie.Add($l)
+$btnBRaport.Add_Click({ Zapisz-Raport })
+
+function Zaznaczone-Wiersze($siatka) {
+    [void]$siatka.EndEdit()
+    @(foreach ($r in $siatka.Rows) { if ($r.Cells[0].Value -eq $true) { $r } })
+}
+
+function Pokoloruj-Rodzaj($wiersz, [int]$kolumna, [string]$rodzaj) {
+    if ($rodzaj -eq 'Zalecane') { $wiersz.Cells[$kolumna].Style.ForeColor = Kolor 'OK' }
+    else { $wiersz.Cells[$kolumna].Style.ForeColor = Kolor 'UWAGA' }
+    $wiersz.Cells[$kolumna].Style.Font = $czcionkaGruba
+}
+
+# =====================================================================
+#  LOGIKA: APLIKACJE
+# =====================================================================
+function Wypelnij-Aplikacje {
+    $siatkaAp.Rows.Clear()
+    Log 'Sprawdzam aplikacje ze Sklepu...'
+    foreach ($el in @(Pobierz-Aplikacje)) {
+        $idx = $siatkaAp.Rows.Add($false, $el.Etykieta, $el.Kategoria, $el.Aplikacja.Opis, $el.Rodzaj, $el.Nazwy)
+        $wiersz = $siatkaAp.Rows[$idx]
+        $wiersz.Tag = $el
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        Pokoloruj-Rodzaj $wiersz 4 $el.Rodzaj
+        $wiersz.Cells[5].Style.ForeColor = $kolorSzary
     }
-    [void]$linie.Add('')
-    [void]$linie.Add('WYKONANE PRACE (dziennik)')
-    [void]$linie.Add($logBox.Text)
-    $pulpit = [Environment]::GetFolderPath('Desktop')
-    $plik = Join-Path $pulpit ('Raport_serwisowy_{0}_{1:yyyyMMdd_HHmm}.txt' -f $env:COMPUTERNAME, (Get-Date))
-    $linie | Out-File -FilePath $plik -Encoding UTF8
-    Log ('Raport zapisany: ' + $plik)
-    Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$plik`""
+    Posortuj-Ponownie $siatkaAp
+    Log ('Zbędnych aplikacji na tym komputerze: ' + $siatkaAp.Rows.Count)
+    Aktualizuj-Status
+}
+
+function Usun-WybraneAplikacje($wybrane) {
+    $ok = 0
+    foreach ($el in $wybrane) {
+        Log ('Usuwam aplikację: ' + $el.Etykieta)
+        if (Usun-Aplikacje $el) {
+            $ok++
+            Zapisz-Prace 'Aplikacje' $el.Etykieta
+        } else {
+            Log '  nie wszystko udało się usunąć (szczegóły wyżej)'
+        }
+    }
+    Log ('Aplikacje: usunięto ' + $ok + ' z ' + @($wybrane).Count + '.')
+}
+
+$btnPakietAp.Add_Click({
+    $nazwa = [string]$cmbPakietAp.SelectedItem
+    $filtr = [string]$pakietyAplikacji[$nazwa]
+    $licznik = 0
+    foreach ($r in $siatkaAp.Rows) {
+        $el = $r.Tag
+        if (($filtr -eq '*ZALECANE*' -and $el.Rodzaj -eq 'Zalecane') -or ($el.Kategoria -eq $filtr)) {
+            $r.Cells[0].Value = $true
+            $licznik++
+        }
+    }
+    Log ('Pakiet "' + $nazwa + '": zaznaczono ' + $licznik + ' aplikacji. Sprawdź listę i kliknij "Usuń zaznaczone".')
+    Aktualizuj-Status
 })
+
+$btnApUsun.Add_Click({
+    $wybrane = @(Zaznaczone $siatkaAp)
+    if ($wybrane.Count -eq 0) { Info 'Zaznacz aplikacje do usunięcia (albo wybierz pakiet).'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Etykieta }) -join $NL
+    if (-not (Pytanie ('Usunąć ' + $wybrane.Count + ' aplikacji? W razie potrzeby można je zainstalować ze Sklepu Microsoft.' + $NL + $NL + $nazwy))) { return }
+    Zajety $true
+    try { Usun-WybraneAplikacje $wybrane }
+    finally {
+        Wypelnij-Aplikacje
+        Zajety $false
+    }
+})
+
+$btnApOdznacz.Add_Click({ Odznacz-Wszystko $siatkaAp })
+$btnApOdswiez.Add_Click({
+    Zajety $true
+    try { Wypelnij-Aplikacje } finally { Zajety $false }
+})
+
+# =====================================================================
+#  LOGIKA: USTAWIENIA
+# =====================================================================
+function Wypelnij-Ustawienia {
+    $siatkaUs.Rows.Clear()
+    foreach ($u in $listaUstawien) {
+        $zastosowane = $false
+        try { $zastosowane = [bool](& $u.Sprawdz) } catch { }
+        if ($zastosowane) { $stanTxt = 'Zastosowane' } else { $stanTxt = 'Domyślne Windows' }
+        $idx = $siatkaUs.Rows.Add($false, $u.Etykieta, $u.Opis, $u.Rodzaj, $stanTxt)
+        $wiersz = $siatkaUs.Rows[$idx]
+        $wiersz.Tag = $u
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        Pokoloruj-Rodzaj $wiersz 3 $u.Rodzaj
+        $wiersz.Cells[4].Style.Font = $czcionkaGruba
+        if ($zastosowane) { $wiersz.Cells[4].Style.ForeColor = Kolor 'OK' } else { $wiersz.Cells[4].Style.ForeColor = $kolorSzary }
+    }
+    Posortuj-Ponownie $siatkaUs
+    Aktualizuj-Status
+}
+
+function Zastosuj-Ustawienia($lista, [bool]$cofnij) {
+    $eksplorator = $false
+    foreach ($u in $lista) {
+        try {
+            if ($cofnij) {
+                [void](& $u.Cofnij)
+                Log ('Przywrócono domyślne: ' + $u.Etykieta)
+                Zapisz-Prace 'Ustawienia' ('Przywrócono domyślne: ' + $u.Etykieta)
+            } else {
+                [void](& $u.Zastosuj)
+                Log ('Ustawiono: ' + $u.Etykieta)
+                Zapisz-Prace 'Ustawienia' $u.Etykieta
+            }
+            if ($u.Eksplorator) { $eksplorator = $true }
+        } catch {
+            Log ('BŁĄD: ' + $u.Etykieta + ': ' + $_.Exception.Message)
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $eksplorator
+}
+
+function Zmien-Ustawienia([bool]$cofnij) {
+    $wybrane = @(Zaznaczone $siatkaUs)
+    if ($wybrane.Count -eq 0) { Info 'Zaznacz ustawienia (albo kliknij "Zaznacz zalecane").'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Etykieta }) -join $NL
+    if ($cofnij) { $pytanie = 'Przywrócić domyślne ustawienia Windows?' } else { $pytanie = 'Zastosować ustawienia?' }
+    if (-not (Pytanie ($pytanie + $NL + $NL + $nazwy))) { return }
+    $eksplorator = $false
+    Zajety $true
+    try {
+        if (-not $cofnij) { Utworz-PunktPrzywracania 'Przed zmiana ustawien' }
+        $eksplorator = Zastosuj-Ustawienia $wybrane $cofnij
+    } finally {
+        Wypelnij-Ustawienia
+        Zajety $false
+    }
+    if ($eksplorator -and (Pytanie ('Część zmian będzie widać po ponownym uruchomieniu Eksploratora (pasek zadań i pulpit znikną na kilka sekund).' + $NL + 'Uruchomić go ponownie teraz?'))) {
+        Restart-Eksploratora
+    }
+}
+
+$btnUsZastosuj.Add_Click({ Zmien-Ustawienia $false })
+$btnUsCofnij.Add_Click({ Zmien-Ustawienia $true })
+$btnUsZalecane.Add_Click({
+    foreach ($r in $siatkaUs.Rows) { $r.Cells[0].Value = (($r.Tag.Rodzaj -eq 'Zalecane') -and ([string]$r.Cells[4].Value -ne 'Zastosowane')) }
+    Aktualizuj-Status
+})
+$btnUsOdznacz.Add_Click({ Odznacz-Wszystko $siatkaUs })
+$btnUsOdswiez.Add_Click({ Wypelnij-Ustawienia })
+$btnUsExplorer.Add_Click({ Restart-Eksploratora; Log 'Eksplorator uruchomiony ponownie.' })
+
+# =====================================================================
+#  LOGIKA: NAPRAWY
+# =====================================================================
+function Wypelnij-Naprawy {
+    $siatkaN.Rows.Clear()
+    foreach ($n in $listaNapraw) {
+        $idx = $siatkaN.Rows.Add($false, $n.Etykieta, $n.Opis, $n.Czas, $n.Restart, '')
+        $wiersz = $siatkaN.Rows[$idx]
+        $wiersz.Tag = $n
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        if ($n.Restart -eq 'TAK') { $wiersz.Cells[4].Style.ForeColor = Kolor 'UWAGA'; $wiersz.Cells[4].Style.Font = $czcionkaGruba }
+    }
+    Aktualizuj-Status
+}
+
+function Wykonaj-Naprawe($n) {
+    Log ('Naprawa: ' + $n.Etykieta + ' (' + $n.Czas + ')...')
+    $wynik = ''
+    try { $wynik = [string]((& $n.Akcja) | Select-Object -Last 1) }
+    catch { $wynik = 'błąd: ' + $_.Exception.Message }
+    if (-not $wynik) { $wynik = 'wykonano' }
+    Log ('  wynik: ' + $wynik)
+    Zapisz-Prace 'Naprawy' ($n.Etykieta + ': ' + $wynik)
+    $wynik
+}
+
+$btnNUruchom.Add_Click({
+    $wiersze = @(Zaznaczone-Wiersze $siatkaN)
+    if ($wiersze.Count -eq 0) { Info 'Zaznacz naprawy do wykonania.'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $nazwy = ($wiersze | ForEach-Object { '- ' + $_.Tag.Etykieta + ' (' + $_.Tag.Czas + ')' }) -join $NL
+    if (-not (Pytanie ('Wykonać naprawy po kolei?' + $NL + $NL + $nazwy))) { return }
+    $restart = $false
+    Zajety $true
+    try {
+        foreach ($r in $wiersze) {
+            $r.Cells[5].Value = 'w toku...'
+            $r.Cells[5].Style.ForeColor = Kolor 'INFO'
+            [System.Windows.Forms.Application]::DoEvents()
+            $wynik = Wykonaj-Naprawe $r.Tag
+            $r.Cells[5].Value = $wynik
+            if ($wynik -like 'błąd*' -or $wynik -like 'nie udało*') { $r.Cells[5].Style.ForeColor = Kolor 'ŹLE' }
+            else { $r.Cells[5].Style.ForeColor = Kolor 'OK' }
+            if ($r.Tag.Restart -eq 'TAK') { $restart = $true }
+        }
+    } finally {
+        Zajety $false
+    }
+    if ($restart) { Info 'Część napraw zadziała dopiero po ponownym uruchomieniu komputera (przycisk "Uruchom ponownie komputer").' }
+})
+
+$btnNOdznacz.Add_Click({ Odznacz-Wszystko $siatkaN })
+$btnNRestart.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
+    if (Pytanie 'Uruchomić ponownie komputer teraz? Zapisz otwarte dokumenty.') {
+        Log 'Ponowne uruchamianie komputera...'
+        Start-Process -FilePath 'shutdown.exe' -ArgumentList '/r /t 5'
+    }
+})
+
+# =====================================================================
+#  LOGIKA: INSTALACJA (winget)
+# =====================================================================
+function Brak-Winget {
+    if (Pytanie ('Na tym komputerze nie ma winget (Instalatora aplikacji).' + $NL + 'Otworzyć go w Sklepie Microsoft? Po instalacji kliknij "Odśwież".')) {
+        Start-Process -FilePath 'ms-windows-store://pdp/?productid=9NBLGGH4NNS1'
+    }
+}
+
+function Wypelnij-Instalacje {
+    $siatkaI.Rows.Clear()
+    $stan.Winget = Sciezka-Winget
+    $zainstalowane = @()
+    if ($stan.Winget) {
+        Log 'Sprawdzam zainstalowane programy (winget, kilka sekund)...'
+        $zainstalowane = @(Pobierz-ZainstalowaneWinget $stan.Winget)
+    } else {
+        Log 'Brak winget (Instalator aplikacji) - zainstaluj go ze Sklepu Microsoft.'
+    }
+    $stan.ZainstalowaneWinget = $zainstalowane
+    foreach ($p in $listaProgramow) {
+        $jest = ($zainstalowane -contains $p.Id)
+        if (-not $stan.Winget) { $stanTxt = 'brak winget' } elseif ($jest) { $stanTxt = 'zainstalowany' } else { $stanTxt = '' }
+        $idx = $siatkaI.Rows.Add($false, $p.Etykieta, $p.Kategoria, $p.Opis, $stanTxt)
+        $wiersz = $siatkaI.Rows[$idx]
+        $wiersz.Tag = $p
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        if ($jest) { $wiersz.Cells[4].Style.ForeColor = Kolor 'OK'; $wiersz.Cells[4].Style.Font = $czcionkaGruba }
+    }
+    Posortuj-Ponownie $siatkaI
+    Aktualizuj-Status
+}
+
+$btnPakietI.Add_Click({
+    $nazwa = [string]$cmbPakietI.SelectedItem
+    $ids = @($pakietyProgramow[$nazwa])
+    $licznik = 0
+    foreach ($r in $siatkaI.Rows) {
+        if (($ids -contains $r.Tag.Id) -and ([string]$r.Cells[4].Value -ne 'zainstalowany')) {
+            $r.Cells[0].Value = $true
+            $licznik++
+        }
+    }
+    Log ('Pakiet "' + $nazwa + '": zaznaczono ' + $licznik + ' programów (zainstalowane pominięto).')
+    Aktualizuj-Status
+})
+
+$btnIInstaluj.Add_Click({
+    $wiersze = @(Zaznaczone-Wiersze $siatkaI)
+    if ($wiersze.Count -eq 0) { Info 'Zaznacz programy do instalacji (albo wybierz pakiet).'; return }
+    if (-not $stan.Winget) { $stan.Winget = Sciezka-Winget }
+    if (-not $stan.Winget) { Brak-Winget; return }
+    if (-not (Wymaga-Admina)) { return }
+    $nazwy = ($wiersze | ForEach-Object { '- ' + $_.Tag.Etykieta }) -join $NL
+    if (-not (Pytanie ('Zainstalować ' + $wiersze.Count + ' program(ów)? Pobieranie może chwilę potrwać.' + $NL + $NL + $nazwy))) { return }
+    Zajety $true
+    try {
+        foreach ($r in $wiersze) {
+            $p = $r.Tag
+            $r.Cells[4].Value = 'instaluję...'
+            $r.Cells[4].Style.ForeColor = Kolor 'INFO'
+            [System.Windows.Forms.Application]::DoEvents()
+            Log ('Instaluję: ' + $p.Etykieta)
+            $wynik = Zainstaluj-Program $stan.Winget $p
+            Log ('  ' + $p.Etykieta + ': ' + $wynik)
+            if ($wynik -eq 'OK') {
+                $r.Cells[4].Value = 'zainstalowany'
+                $r.Cells[4].Style.ForeColor = Kolor 'OK'
+                Zapisz-Prace 'Instalacja' ('Zainstalowano: ' + $p.Etykieta)
+            } elseif ($wynik -eq 'już zainstalowany') {
+                $r.Cells[4].Value = 'zainstalowany'
+                $r.Cells[4].Style.ForeColor = Kolor 'OK'
+            } else {
+                $r.Cells[4].Value = $wynik
+                $r.Cells[4].Style.ForeColor = Kolor 'ŹLE'
+            }
+            $r.Cells[0].Value = $false
+        }
+    } finally {
+        Zajety $false
+    }
+})
+
+$btnIAktualizuj.Add_Click({
+    if (-not $stan.Winget) { $stan.Winget = Sciezka-Winget }
+    if (-not $stan.Winget) { Brak-Winget; return }
+    if (-not (Wymaga-Admina)) { return }
+    if (-not (Pytanie ('Zaktualizować wszystkie programy, dla których jest nowsza wersja?' + $NL + 'Może to potrwać kilkanaście minut. Zamknij otwarte programy.'))) { return }
+    Zajety $true
+    try {
+        Log 'Aktualizuję programy (winget upgrade --all)...'
+        $w = Uruchom-Program ('"' + $stan.Winget + '" upgrade --all --silent --accept-package-agreements --accept-source-agreements') 'aktualizacja programów'
+        foreach ($l in @(Ostatnie-Linie $w.Tekst 4)) { Log ('  ' + $l) }
+        if ($w.Kod -eq 0) {
+            Log 'Aktualizacja programów zakończona.'
+            Zapisz-Prace 'Instalacja' 'Zaktualizowano zainstalowane programy do najnowszych wersji'
+        } else {
+            Log ('Aktualizacja zakończona z uwagami: ' + (Opis-KoduWinget $w.Kod $w.Tekst))
+            Zapisz-Prace 'Instalacja' 'Zaktualizowano zainstalowane programy (część mogła wymagać ręcznej aktualizacji)'
+        }
+    } finally {
+        Zajety $false
+    }
+})
+
+$btnIOdznacz.Add_Click({ Odznacz-Wszystko $siatkaI })
+$btnIOdswiez.Add_Click({
+    Zajety $true
+    try { Wypelnij-Instalacje } finally { Zajety $false }
+})
+
+# =====================================================================
+#  LOGIKA: SPRZET
+# =====================================================================
+function Wypelnij-Sprzet {
+    Log 'Sprawdzam sprzęt (kilka sekund)...'
+    $wyniki = @(Sprawdz-Sprzet)
+    $stan.Sprzet = $wyniki
+    Wypelnij-Wyniki $siatkaS $wyniki
+    $zle = @($wyniki | Where-Object { $_.Ocena -eq 'ŹLE' }).Count
+    $uwagi = @($wyniki | Where-Object { $_.Ocena -eq 'UWAGA' }).Count
+    Log ('Sprzęt: do naprawy ' + $zle + ', do poprawy ' + $uwagi + '.')
+    Aktualizuj-Status
+}
+
+$btnSOdswiez.Add_Click({
+    Zajety $true
+    try { Wypelnij-Sprzet } finally { Zajety $false }
+})
+
+$btnSKlucz.Add_Click({
+    if (-not $stan.KluczWindows) { Info 'Ten komputer nie ma klucza Windows zapisanego w BIOS/UEFI.'; return }
+    [System.Windows.Forms.Clipboard]::SetText($stan.KluczWindows)
+    Log 'Klucz Windows z BIOS/UEFI skopiowany do schowka.'
+})
+
+$btnSBateria.Add_Click({
+    $plik = Join-Path $env:TEMP 'raport_baterii.html'
+    Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    Zajety $true
+    try { [void](Uruchom-Program ('powercfg.exe /batteryreport /output "' + $plik + '"') 'raport baterii') }
+    finally { Zajety $false }
+    if (Test-Path -LiteralPath $plik) { Start-Process -FilePath $plik; Log 'Otworzono raport baterii.' }
+    else { Info 'Nie udało się utworzyć raportu baterii (komputer bez baterii albo brak uprawnień).' }
+})
+
+$btnSPamiec.Add_Click({
+    if (-not (Wymaga-Admina)) { return }
+    if (Pytanie ('Test pamięci RAM wymaga ponownego uruchomienia komputera i trwa kilkanaście minut.' + $NL + 'Za chwilę Windows zapyta, czy uruchomić go teraz. Kontynuować?')) {
+        Start-Process -FilePath 'mdsched.exe'
+    }
+})
+
+$btnSUrzadzenia.Add_Click({ Start-Process -FilePath 'devmgmt.msc' })
+$btnSSterowniki.Add_Click({ Start-Process -FilePath 'ms-settings:windowsupdate-optionalupdates' })
+
+# =====================================================================
+#  LOGIKA: PRZED REINSTALACJA
+# =====================================================================
+function Wypelnij-Kopie {
+    $siatkaK.Rows.Clear()
+    foreach ($k in $listaKopii) {
+        $opis = $k.Opis
+        $rozmiar = '-'
+        if ($k.Zrodlo) { $opis = $opis + $NL + $k.Zrodlo; $rozmiar = '...' }
+        $idx = $siatkaK.Rows.Add($false, $k.Etykieta, $opis, $rozmiar)
+        $wiersz = $siatkaK.Rows[$idx]
+        $wiersz.Tag = $k
+        $wiersz.Cells[1].Style.Font = $czcionkaGruba
+        $wiersz.Cells[2].Style.ForeColor = $kolorSzary
+    }
+    Aktualizuj-Status
+}
+
+function Przelicz-Kopie {
+    foreach ($r in $siatkaK.Rows) {
+        $k = $r.Tag
+        if (-not $k.Zrodlo) { continue }
+        $r.Cells[3].Value = 'liczę...'
+        [System.Windows.Forms.Application]::DoEvents()
+        $k.Bajty = Rozmiar-Folderu $k.Zrodlo
+        $r.Cells[3].Value = Tekst-Rozmiaru $k.Bajty
+    }
+    Posortuj-Ponownie $siatkaK
+}
+
+$btnKWybierz.Add_Click({
+    $okno = New-Object System.Windows.Forms.FolderBrowserDialog
+    $okno.Description = 'Wybierz pendrive albo dysk zewnętrzny na kopię'
+    $okno.ShowNewFolderButton = $true
+    if ($okno.ShowDialog() -ne 'OK') { return }
+    $stan.FolderKopiiDanych = $okno.SelectedPath
+    $lblCelKopii.Text = $okno.SelectedPath
+    try {
+        $dysk = New-Object System.IO.DriveInfo([IO.Path]::GetPathRoot($okno.SelectedPath))
+        $lblCelKopii.Text = $okno.SelectedPath + '   (wolne: ' + (Tekst-Rozmiaru $dysk.AvailableFreeSpace) + ')'
+    } catch { }
+})
+
+$btnKWykonaj.Add_Click({
+    $wybrane = @(Zaznaczone $siatkaK)
+    if ($wybrane.Count -eq 0) { Info 'Zaznacz, co skopiować.'; return }
+    if (-not $stan.FolderKopiiDanych) { Info 'Najpierw kliknij "Wybierz folder..." i wskaż pendrive albo dysk zewnętrzny.'; return }
+    if (-not (Wymaga-Admina)) { return }
+    $korzen = [IO.Path]::GetPathRoot($stan.FolderKopiiDanych)
+    if ($korzen -and $env:SystemDrive -and $korzen.StartsWith($env:SystemDrive, [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Pytanie ('Wybrany folder jest na dysku systemowym ' + $env:SystemDrive + ' - przy reinstalacji kopia może zniknąć!' + $NL + 'Kontynuować mimo to?'))) { return }
+    }
+    $potrzeba = [long]0
+    foreach ($k in $wybrane) { if ($k.Bajty -gt 0) { $potrzeba += $k.Bajty } }
+    try {
+        $wolne = (New-Object System.IO.DriveInfo($korzen)).AvailableFreeSpace
+        if ($potrzeba -gt $wolne) { Info ('Za mało miejsca: potrzeba ' + (Tekst-Rozmiaru $potrzeba) + ', wolne ' + (Tekst-Rozmiaru $wolne) + '.'); return }
+    } catch { }
+    $nazwy = ($wybrane | ForEach-Object { '- ' + $_.Etykieta }) -join $NL
+    if (-not (Pytanie ('Skopiować do ' + $stan.FolderKopiiDanych + '?' + $NL + $NL + $nazwy))) { return }
+    $cel = Join-Path $stan.FolderKopiiDanych ('Kopia_' + $env:COMPUTERNAME + '_' + (Get-Date -Format 'yyyyMMdd_HHmm'))
+    Zajety $true
+    try {
+        New-Item -ItemType Directory -Force -Path $cel | Out-Null
+        foreach ($k in $wybrane) {
+            Log ('Kopia: ' + $k.Etykieta + '...')
+            $celEl = Join-Path $cel $k.Cel
+            $wynik = ''
+            try {
+                if ($k.Akcja) {
+                    $wynik = [string]((& $k.Akcja $k $celEl) | Select-Object -Last 1)
+                } else {
+                    $w = Uruchom-Program ('robocopy.exe "' + $k.Zrodlo + '" "' + $celEl + '" /E /R:1 /W:1 /XJ /NP /NFL /NDL /MT:8') ('kopia ' + $k.Etykieta)
+                    if ($w.Kod -lt 8) { $wynik = 'skopiowano' } else { $wynik = 'błędy kopiowania (kod ' + $w.Kod + ')' }
+                }
+            } catch { $wynik = 'błąd: ' + $_.Exception.Message }
+            Log ('  ' + $wynik)
+        }
+        Zapisz-Prace 'Kopia' ('Kopia zapasowa: ' + (($wybrane | ForEach-Object { $_.Etykieta }) -join ', '))
+        $stan.OstatniaKopia = $cel
+        Log ('Kopia gotowa: ' + $cel)
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $cel + '"')
+    } finally {
+        Zajety $false
+    }
+})
+
+$btnKWszystko.Add_Click({
+    foreach ($r in $siatkaK.Rows) { $r.Cells[0].Value = $true }
+    Aktualizuj-Status
+})
+$btnKOdznacz.Add_Click({ Odznacz-Wszystko $siatkaK })
+$btnKPrzelicz.Add_Click({
+    Zajety $true
+    try { Przelicz-Kopie } finally { Zajety $false }
+})
+$btnKOtworz.Add_Click({
+    $f = $stan.OstatniaKopia
+    if (-not $f) { $f = $stan.FolderKopiiDanych }
+    if (-not $f) { Info 'Nie wybrano jeszcze folderu kopii.'; return }
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $f + '"')
+})
+
+# =====================================================================
+#  OKNO: NAJWIEKSZE FOLDERY
+# =====================================================================
+function Rozmiar-FolderuNaZywo([string]$sciezka) {
+    $suma = [long]0
+    $licznik = 0
+    Get-ChildItem -LiteralPath $sciezka -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $suma += $_.Length
+        $licznik++
+        if ($licznik % 400 -eq 0) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if ($stan.NF.Przerwij) { throw 'PRZERWANO' }
+        }
+    }
+    $suma
+}
+
+function Skanuj-Jeden([string]$sciezka) {
+    $nf = $stan.NF
+    $g = $nf.Siatka
+    $nf.Sciezka = $sciezka
+    $nf.Etykieta.Text = $sciezka + '   (liczę...)'
+    $g.Rows.Clear()
+    $foldery = @(Get-ChildItem -LiteralPath $sciezka -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+    foreach ($f in $foldery) {
+        $idx = $g.Rows.Add($f.Name, '...', '')
+        $g.Rows[$idx].Tag = [pscustomobject]@{ Sciezka = $f.FullName; Bajty = [long]-1 }
+    }
+    $pliki = [long]((Get-ChildItem -LiteralPath $sciezka -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum)
+    $idx = $g.Rows.Add('[pliki leżące bezpośrednio w tym folderze]', (Tekst-Rozmiaru $pliki), '')
+    $g.Rows[$idx].Tag = [pscustomobject]@{ Sciezka = ''; Bajty = $pliki }
+    $suma = $pliki
+    foreach ($r in @($g.Rows)) {
+        if ($nf.Przerwij) { throw 'PRZERWANO' }
+        $t = $r.Tag
+        if (-not $t.Sciezka) { continue }
+        $r.Cells[1].Value = 'liczę...'
+        [System.Windows.Forms.Application]::DoEvents()
+        $t.Bajty = Rozmiar-FolderuNaZywo $t.Sciezka
+        $suma += $t.Bajty
+        if ($nf.Okno.IsDisposed) { return }
+        $r.Cells[1].Value = Tekst-Rozmiaru $t.Bajty
+    }
+    foreach ($r in $g.Rows) {
+        if ($suma -gt 0 -and $r.Tag.Bajty -ge 0) { $r.Cells[2].Value = ('{0:N1}%' -f (100.0 * $r.Tag.Bajty / $suma)) }
+    }
+    $g.Sort($g.Columns[1], [System.ComponentModel.ListSortDirection]::Descending)
+    $nf.Etykieta.Text = $sciezka + '   razem: ' + (Tekst-Rozmiaru $suma) + '      Kliknij dwukrotnie folder, żeby wejść do środka.'
+}
+
+function Skanuj-Folder([string]$sciezka) {
+    $nf = $stan.NF
+    if ($nf.Skanuje) { $nf.Nastepny = $sciezka; $nf.Przerwij = $true; return }
+    $nf.Skanuje = $true
+    try {
+        while ($sciezka) {
+            $nf.Nastepny = ''
+            $nf.Przerwij = $false
+            try { Skanuj-Jeden $sciezka }
+            catch {
+                if ([string]$_.Exception.Message -notmatch 'PRZERWANO' -and -not $nf.Okno.IsDisposed) {
+                    $nf.Etykieta.Text = $sciezka + '   błąd: ' + $_.Exception.Message
+                }
+            }
+            if ($nf.Okno.IsDisposed) { break }
+            $sciezka = $nf.Nastepny
+        }
+    } finally {
+        $nf.Skanuje = $false
+    }
+}
+
+function Pokaz-NajwiekszeFoldery([string]$start) {
+    $okno = New-Object System.Windows.Forms.Form
+    $okno.Text = 'Największe foldery'
+    $okno.Size = New-Object System.Drawing.Size([math]::Min(1000, $szerokoscOkna - 40), [math]::Min(660, $wysokoscOkna - 40))
+    $okno.StartPosition = 'CenterParent'
+    $okno.Font = $czcionka
+    $okno.BackColor = $kolorTlo
+
+    $siatka = Nowa-Siatka
+    Dodaj-Kolumne $siatka 'Text' 'Folder' 0 ''
+    Dodaj-Kolumne $siatka 'Text' 'Rozmiar' 130 'Bajty'
+    Dodaj-Kolumne $siatka 'Text' 'Udział' 100 'Bajty'
+
+    $etykieta = New-Object System.Windows.Forms.Label
+    $etykieta.Dock = 'Top'
+    $etykieta.Height = 40
+    $etykieta.Padding = New-Object System.Windows.Forms.Padding(12, 10, 12, 4)
+    $etykieta.BackColor = $kolorPodpowiedz
+    $etykieta.Font = $czcionkaGruba
+    $etykieta.AutoEllipsis = $true
+
+    $panel = Nowy-PanelPrzyciskow
+    $bOtworz  = Nowy-Przycisk $panel 'Otwórz w Eksploratorze' $true
+    $bGora    = Nowy-Przycisk $panel 'W górę' $false
+    $bProfil  = Nowy-Przycisk $panel 'Folder użytkownika' $false
+    $bDysk    = Nowy-Przycisk $panel ('Cały dysk ' + $env:SystemDrive) $false
+    $bWybierz = Nowy-Przycisk $panel 'Wybierz folder...' $false
+
+    $okno.Controls.Add($siatka)
+    $okno.Controls.Add($etykieta)
+    $okno.Controls.Add($panel)
+
+    $stan.NF = @{ Okno = $okno; Siatka = $siatka; Etykieta = $etykieta; Sciezka = ''; Skanuje = $false; Przerwij = $false; Nastepny = ''; Start = $start }
+
+    $siatka.Add_CellDoubleClick({
+        param($nadawca, $e)
+        if ($e.RowIndex -lt 0) { return }
+        $t = $nadawca.Rows[$e.RowIndex].Tag
+        if ($t -and $t.Sciezka) { Skanuj-Folder $t.Sciezka }
+    })
+    $bGora.Add_Click({
+        $rodzic = [IO.Directory]::GetParent($stan.NF.Sciezka)
+        if ($rodzic) { Skanuj-Folder $rodzic.FullName }
+    })
+    $bProfil.Add_Click({ Skanuj-Folder $env:USERPROFILE })
+    $bDysk.Add_Click({ Skanuj-Folder ($env:SystemDrive + '\') })
+    $bWybierz.Add_Click({
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog
+        $d.Description = 'Wybierz folder do sprawdzenia'
+        if ($d.ShowDialog() -eq 'OK') { Skanuj-Folder $d.SelectedPath }
+    })
+    $bOtworz.Add_Click({
+        $f = $stan.NF.Sciezka
+        $w = $stan.NF.Siatka.CurrentRow
+        if ($w -and $w.Tag -and $w.Tag.Sciezka) { $f = $w.Tag.Sciezka }
+        if ($f) { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $f + '"') }
+    })
+    $okno.Add_FormClosing({ $stan.NF.Przerwij = $true })
+    $okno.Add_Shown({ Skanuj-Folder $stan.NF.Start })
+
+    [void]$okno.ShowDialog($form)
+    $okno.Dispose()
+}
+
+# =====================================================================
+#  OKNO: SERWIS EKSPRESOWY
+# =====================================================================
+function Odswiez-Zaladowane {
+    Wypelnij-Uslugi
+    if ($stan.Zaladowane.ContainsKey($tabCzyszczenie.Text)) { Przelicz-Rozmiary }
+    if ($stan.Zaladowane.ContainsKey($tabUstawienia.Text)) { Wypelnij-Ustawienia }
+    if ($stan.Zaladowane.ContainsKey($tabAplikacje.Text)) { Wypelnij-Aplikacje }
+    if ($stan.Zaladowane.ContainsKey($tabSprzet.Text)) { Wypelnij-Sprzet }
+    if ($stan.Zaladowane.ContainsKey($tabBezp.Text)) { Wypelnij-Bezpieczenstwo }
+}
+
+function Wykonaj-Ekspres($wybor) {
+    $start = Get-Date
+    $eksplorator = $false
+    Zajety $true
+    try {
+        Log '=== SERWIS EKSPRESOWY ==='
+        Utworz-PunktPrzywracania 'Serwis ekspresowy'
+        if ($wybor.Uslugi) {
+            $lista = @($listaUslug | Where-Object { $_.Rodzaj -eq 'Zalecane' } | Where-Object {
+                (Get-Service -Name $_.Nazwa -ErrorAction SilentlyContinue) -and ((Get-StartInfo $_.Nazwa).Start -ne 4) })
+            Log ('Krok 1: zbędne usługi (' + $lista.Count + ')')
+            if ($lista.Count -gt 0) { Zastosuj-Uslugi $lista 'disabled' 'Wyłączony' }
+        }
+        if ($wybor.Czyszczenie) {
+            Log 'Krok 2: czyszczenie dysku'
+            [void](Wyczysc-Pozycje @($listaCzyszczenia | Where-Object { $_.Zaznacz }))
+        }
+        if ($wybor.Ustawienia) {
+            $lista = @($listaUstawien | Where-Object { $_.Rodzaj -eq 'Zalecane' } | Where-Object { -not (& $_.Sprawdz) })
+            Log ('Krok 3: ustawienia Windows (' + $lista.Count + ')')
+            if ($lista.Count -gt 0) { $eksplorator = Zastosuj-Ustawienia $lista $false }
+        }
+        if ($wybor.Aplikacje) {
+            $lista = @(Pobierz-Aplikacje | Where-Object { $_.Rodzaj -eq 'Zalecane' })
+            Log ('Krok 4: zbędne aplikacje (' + $lista.Count + ')')
+            if ($lista.Count -gt 0) { Usun-WybraneAplikacje $lista }
+        }
+        if ($wybor.Naprawy) {
+            Log 'Krok 5: naprawa plików systemu (DISM + SFC)'
+            foreach ($n in @($listaNapraw | Where-Object { $_.Etykieta -match '\((DISM|SFC)\)$' })) { [void](Wykonaj-Naprawe $n) }
+        }
+        Log ('=== Serwis ekspresowy zakończony (' + [int]((Get-Date) - $start).TotalMinutes + ' min) ===')
+    } catch {
+        Log ('BŁĄD serwisu ekspresowego: ' + $_.Exception.Message)
+    } finally {
+        Zajety $false
+    }
+    Zajety $true
+    try { Odswiez-Zaladowane } finally { Zajety $false }
+    if ($wybor.Raport) {
+        $stan.Sprzet = @()
+        $stan.Bezpieczenstwo = @()
+        Zapisz-Raport
+    }
+    if ($eksplorator -and (Pytanie ('Część ustawień będzie widać po ponownym uruchomieniu Eksploratora (pasek zadań i pulpit znikną na kilka sekund).' + $NL + 'Uruchomić go ponownie teraz?'))) {
+        Restart-Eksploratora
+    }
+    Info 'Serwis ekspresowy zakończony. Uruchom ponownie komputer, żeby wszystkie zmiany zaczęły działać.'
+}
+
+function Pokaz-Ekspres {
+    if (-not (Wymaga-Admina)) { return }
+    $okno = New-Object System.Windows.Forms.Form
+    $okno.Text = 'Serwis ekspresowy'
+    $okno.Size = New-Object System.Drawing.Size(660, 500)
+    $okno.StartPosition = 'CenterParent'
+    $okno.FormBorderStyle = 'FixedDialog'
+    $okno.MaximizeBox = $false
+    $okno.MinimizeBox = $false
+    $okno.Font = $czcionka
+    $okno.BackColor = [System.Drawing.Color]::White
+
+    $opis = New-Object System.Windows.Forms.Label
+    $opis.Dock = 'Top'
+    $opis.Height = 66
+    $opis.Padding = New-Object System.Windows.Forms.Padding(14, 10, 14, 6)
+    $opis.BackColor = $kolorPodpowiedz
+    $opis.Text = 'Zaznaczone kroki wykonają się po kolei, bez dodatkowych pytań. Najpierw powstanie punkt przywracania, ' +
+        'a każdą zmianę da się cofnąć w jej zakładce. Na koniec otworzy się raport dla klienta.'
+
+    $lista = New-Object System.Windows.Forms.FlowLayoutPanel
+    $lista.Dock = 'Fill'
+    $lista.FlowDirection = 'TopDown'
+    $lista.WrapContents = $false
+    $lista.AutoScroll = $true
+    $lista.Padding = New-Object System.Windows.Forms.Padding(16, 10, 10, 4)
+
+    $kroki = @(
+        @{ Klucz = 'Uslugi';      Tekst = 'Wyłącz zbędne usługi (tylko zielone, bezpieczne: telemetria, raporty błędów itp.)'; Wl = $true }
+        @{ Klucz = 'Czyszczenie'; Tekst = 'Wyczyść dysk (pliki tymczasowe, cache aktualizacji, raporty błędów)'; Wl = $true }
+        @{ Klucz = 'Ustawienia';  Tekst = 'Zalecane ustawienia Windows (bez reklam, Binga, Recall i widżetów; rozszerzenia plików)'; Wl = $true }
+        @{ Klucz = 'Aplikacje';   Tekst = 'Usuń zbędne aplikacje (Candy Crush, Porady, Cortana, Skype...)'; Wl = $false }
+        @{ Klucz = 'Naprawy';     Tekst = 'Napraw pliki systemu: DISM i SFC (dodatkowe 20-40 minut)'; Wl = $false }
+        @{ Klucz = 'Raport';      Tekst = 'Sprawdź sprzęt i zabezpieczenia, zrób raport dla klienta'; Wl = $true }
+    )
+    foreach ($k in $kroki) {
+        $cb = New-Object System.Windows.Forms.CheckBox
+        $cb.Text = $k.Tekst
+        $cb.Checked = $k.Wl
+        $cb.AutoSize = $true
+        $cb.Margin = New-Object System.Windows.Forms.Padding(3, 7, 3, 7)
+        [void]$lista.Controls.Add($cb)
+        $k.Pole = $cb
+    }
+
+    $panel = Nowy-PanelPrzyciskow
+    $panel.BackColor = [System.Drawing.Color]::White
+    $bStart = Nowy-Przycisk $panel 'Start' $true
+    $bAnuluj = Nowy-Przycisk $panel 'Anuluj' $false
+    $bStart.DialogResult = 'OK'
+    $bAnuluj.DialogResult = 'Cancel'
+    $okno.AcceptButton = $bStart
+    $okno.CancelButton = $bAnuluj
+
+    $okno.Controls.Add($lista)
+    $okno.Controls.Add($opis)
+    $okno.Controls.Add($panel)
+
+    $wynik = $okno.ShowDialog($form)
+    $wybor = @{}
+    foreach ($k in $kroki) { $wybor[$k.Klucz] = [bool]$k.Pole.Checked }
+    $okno.Dispose()
+    if ([string]$wynik -ne 'OK') { return }
+    if (@($wybor.Values | Where-Object { $_ }).Count -eq 0) { return }
+    Wykonaj-Ekspres $wybor
+}
+
+# =====================================================================
+#  POMOC ZDALNA I PRZYCISKI NA BANERZE
+# =====================================================================
+function Uruchom-PomocZdalna {
+    if (Test-Path -LiteralPath 'Registry::HKEY_CLASSES_ROOT\ms-quick-assist') {
+        Start-Process -FilePath 'ms-quick-assist:'
+        Log 'Uruchomiono Szybką pomoc Windows (Quick Assist).'
+        return
+    }
+    $qa = Join-Path $env:windir 'System32\quickassist.exe'
+    if (Test-Path -LiteralPath $qa) {
+        Start-Process -FilePath $qa
+        Log 'Uruchomiono Szybką pomoc Windows (Quick Assist).'
+        return
+    }
+    if (Pytanie ('Szybka pomoc Windows nie jest zainstalowana.' + $NL + 'Otworzyć ją w Sklepie Microsoft? (Możesz też zainstalować AnyDesk w zakładce Instalacja.)')) {
+        Start-Process -FilePath 'ms-windows-store://pdp/?productid=9P7BP5VNWKX5'
+    }
+}
+
+$btnEkspres.Add_Click({ Pokaz-Ekspres })
+$btnRaport.Add_Click({ Zapisz-Raport })
+$btnPomoc.Add_Click({ Uruchom-PomocZdalna })
 
 # =====================================================================
 #  START
@@ -1493,11 +3528,25 @@ $zakladki.Add_SelectedIndexChanged({
             elseif ($t -eq $tabProgramy) { Wypelnij-Programy }
             elseif ($t -eq $tabCzyszczenie) { Wypelnij-Czyszczenie; Przelicz-Rozmiary }
             elseif ($t -eq $tabBezp) { Wypelnij-Bezpieczenstwo }
+            elseif ($t -eq $tabAplikacje) { Wypelnij-Aplikacje }
+            elseif ($t -eq $tabUstawienia) { Wypelnij-Ustawienia }
+            elseif ($t -eq $tabNaprawy) { Wypelnij-Naprawy }
+            elseif ($t -eq $tabInstalacja) { Wypelnij-Instalacje }
+            elseif ($t -eq $tabSprzet) { Wypelnij-Sprzet }
+            elseif ($t -eq $tabKopia) { Wypelnij-Kopie; Przelicz-Kopie }
         } finally {
             Zajety $false
         }
     }
     Aktualizuj-Status
+})
+
+$form.Add_FormClosing({
+    param($nadawca, $e)
+    if ($stan.Zajety -gt 0) {
+        $e.Cancel = $true
+        Info 'Poczekaj, aż skończy się bieżąca operacja (postęp widać w dzienniku na dole okna).'
+    }
 })
 
 $form.Add_Shown({
