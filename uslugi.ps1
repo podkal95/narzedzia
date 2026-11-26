@@ -41,36 +41,110 @@ $stan = @{ Zaladowane = @{}; Bezpieczenstwo = @() }
 # =====================================================================
 #  DANE: USLUGI
 # =====================================================================
-function Nowa-Usluga($nazwa, $etykieta, $opis, $rodzaj, $domyslnie) {
-    [pscustomobject]@{ Nazwa = $nazwa; Etykieta = $etykieta; Opis = $opis; Rodzaj = $rodzaj; Domyslnie = $domyslnie }
+function Nowa-Usluga($nazwa, $kategoria, $etykieta, $opis, $rodzaj, $domyslnie) {
+    [pscustomobject]@{ Nazwa = $nazwa; Kategoria = $kategoria; Etykieta = $etykieta; Opis = $opis; Rodzaj = $rodzaj; Domyslnie = $domyslnie }
 }
+# Rodzaj: Zalecane = bezpieczne prawie zawsze; Opcjonalne = tylko gdy klient z tego nie korzysta.
+# Domyslnie = typ uruchamiania w czystym Windows (do przycisku "Przywróć domyślne"); usług, których dany Windows nie ma, nie widać.
 $listaUslug = @(
-    Nowa-Usluga 'DiagTrack'        'Telemetria Microsoft'          'Wysyła dane diagnostyczne i o użytkowaniu do Microsoft. Bez wpływu na działanie komputera.' 'Zalecane' 'auto'
-    Nowa-Usluga 'dmwappushservice' 'WAP Push (telemetria)'         'Przekazuje komunikaty telemetrii i zarządzania. NIE wyłączaj na komputerach firmowych zarządzanych przez Intune.' 'Zalecane' 'demand'
-    Nowa-Usluga 'diagnosticshub.standardcollector.service' 'Diagnostics Hub' 'Zbiera diagnostykę dla Visual Studio. Potrzebne tylko programistom.' 'Zalecane' 'demand'
-    Nowa-Usluga 'WerSvc'           'Raportowanie błędów Windows'   'Wysyła raporty o awariach programów do Microsoft.' 'Zalecane' 'demand'
-    Nowa-Usluga 'RetailDemo'       'Tryb demo sklepu'              'Tryb pokazowy dla komputerów wystawionych w sklepie.' 'Zalecane' 'demand'
-    Nowa-Usluga 'MapsBroker'       'Mapy offline'                  'Pobiera i aktualizuje mapy dla aplikacji Mapy.' 'Zalecane' 'delayed-auto'
-    Nowa-Usluga 'Fax'              'Faks'                          'Wysyłanie i odbieranie faksów.' 'Zalecane' 'demand'
-    Nowa-Usluga 'RemoteRegistry'   'Zdalny rejestr'                'Pozwala zmieniać rejestr przez sieć. Ryzyko bezpieczeństwa.' 'Zalecane' 'disabled'
-    Nowa-Usluga 'WMPNetworkSvc'    'Udostępnianie Windows Media Player' 'Udostępnia bibliotekę multimediów innym urządzeniom w sieci.' 'Zalecane' 'demand'
-    Nowa-Usluga 'AJRouter'         'AllJoyn Router'                'Komunikacja z urządzeniami IoT (praktycznie nieużywana).' 'Zalecane' 'demand'
-    Nowa-Usluga 'wisvc'            'Windows Insider'               'Obsługa testowych wersji Windows.' 'Zalecane' 'demand'
+    # --- Telemetria ---
+    Nowa-Usluga 'DiagTrack'        'Telemetria' 'Telemetria Microsoft'            'Wysyła dane diagnostyczne i o użytkowaniu do Microsoft. Bez wpływu na działanie komputera.' 'Zalecane' 'auto'
+    Nowa-Usluga 'dmwappushservice' 'Telemetria' 'WAP Push (telemetria)'           'Przekazuje komunikaty telemetrii i zarządzania. NIE wyłączaj na komputerach firmowych zarządzanych przez Intune.' 'Zalecane' 'demand'
+    Nowa-Usluga 'InventorySvc'     'Telemetria' 'Inwentaryzacja zgodności'        'Zbiera dla Microsoft listę programów i ocenę zgodności z nowszym Windows.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'PcaSvc'           'Telemetria' 'Asystent zgodności programów'    'Podpowiada ustawienia zgodności dla starych programów. Bez niego tych podpowiedzi nie będzie.' 'Opcjonalne' 'auto'
 
-    Nowa-Usluga 'XblAuthManager'   'Xbox - logowanie'              'Przestanie działać logowanie do Xbox / Game Pass i część gier ze Sklepu.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'XblGameSave'      'Xbox - zapisy w chmurze'       'Zapisy gier Xbox nie będą synchronizowane.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'XboxNetApiSvc'    'Xbox - sieć'                   'Gry sieciowe przez Xbox Live mogą nie działać.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'XboxGipSvc'       'Xbox - akcesoria'              'Brak aktualizacji i konfiguracji padów Xbox.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'Spooler'          'Bufor wydruku'                 'Przestaną działać WSZYSTKIE drukarki oraz "Microsoft Print to PDF".' 'Opcjonalne' 'auto'
-    Nowa-Usluga 'PrintNotify'      'Powiadomienia drukarek'        'Brak powiadomień i rozszerzeń sterowników drukarek.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'WSearch'          'Indeksowanie wyszukiwania'     'Wyszukiwanie w menu Start, Eksploratorze i Outlooku będzie wolniejsze.' 'Opcjonalne' 'delayed-auto'
-    Nowa-Usluga 'SysMain'          'SysMain (Superfetch)'          'Wstępne ładowanie programów. Na SSD zwykle zbędne, na HDD lepiej zostawić.' 'Opcjonalne' 'auto'
-    Nowa-Usluga 'lfsvc'            'Lokalizacja'                   'Pogoda, mapy i "Znajdź moje urządzenie" nie ustalą położenia.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'TrkWks'           'Śledzenie łączy rozproszonych' 'Naprawia skróty do plików przeniesionych w sieci firmowej. W domu zbędne.' 'Opcjonalne' 'auto'
-    Nowa-Usluga 'WpcMonSvc'        'Kontrola rodzicielska'         'Nie wyłączaj, jeśli dzieci mają konta w Microsoft Family.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'TermService'      'Pulpit zdalny (RDP)'           'Nikt nie połączy się z tym komputerem przez Pulpit zdalny.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'bthserv'          'Bluetooth'                     'Przestaną działać słuchawki, myszki i inne urządzenia Bluetooth.' 'Opcjonalne' 'demand'
-    Nowa-Usluga 'icssvc'           'Mobilny hotspot'               'Nie da się udostępnić internetu z tego komputera.' 'Opcjonalne' 'demand'
+    # --- Diagnostyka ---
+    Nowa-Usluga 'diagnosticshub.standardcollector.service' 'Diagnostyka' 'Diagnostics Hub' 'Zbiera diagnostykę dla Visual Studio. Potrzebne tylko programistom.' 'Zalecane' 'demand'
+    Nowa-Usluga 'WerSvc'           'Diagnostyka' 'Raportowanie błędów Windows'   'Wysyła raporty o awariach programów do Microsoft.' 'Zalecane' 'demand'
+    Nowa-Usluga 'wercplsupport'    'Diagnostyka' 'Panel raportów problemów'      'Pokazuje historię raportów o problemach w Panelu sterowania.' 'Zalecane' 'demand'
+    Nowa-Usluga 'DPS'              'Diagnostyka' 'Zasady diagnostyki'            'Wykrywa problemy i uruchamia narzędzia do rozwiązywania problemów (np. z siecią). Bez niej te narzędzia nie zadziałają.' 'Opcjonalne' 'auto'
+    Nowa-Usluga 'WdiServiceHost'   'Diagnostyka' 'Host usługi diagnostyki'       'Pomocnicza usługa diagnostyki Windows (współpracuje z Zasadami diagnostyki).' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WdiSystemHost'    'Diagnostyka' 'Host systemu diagnostyki'      'Pomocnicza usługa diagnostyki Windows (współpracuje z Zasadami diagnostyki).' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'TroubleshootingSvc' 'Diagnostyka' 'Zalecane rozwiązywanie problemów' 'Automatycznie proponuje poprawki znanych problemów Windows.' 'Opcjonalne' 'demand'
+
+    # --- Gry (Xbox) ---
+    Nowa-Usluga 'XblAuthManager'   'Gry (Xbox)' 'Xbox - logowanie'              'Przestanie działać logowanie do Xbox / Game Pass i część gier ze Sklepu.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'XblGameSave'      'Gry (Xbox)' 'Xbox - zapisy w chmurze'       'Zapisy gier Xbox nie będą synchronizowane.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'XboxNetApiSvc'    'Gry (Xbox)' 'Xbox - sieć'                   'Gry sieciowe przez Xbox Live mogą nie działać.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'XboxGipSvc'       'Gry (Xbox)' 'Xbox - akcesoria'              'Brak aktualizacji i konfiguracji padów Xbox.' 'Opcjonalne' 'demand'
+
+    # --- Drukarki i skanery ---
+    Nowa-Usluga 'Fax'              'Drukarki i skanery' 'Faks'                  'Wysyłanie i odbieranie faksów.' 'Zalecane' 'demand'
+    Nowa-Usluga 'Spooler'          'Drukarki i skanery' 'Bufor wydruku'         'Przestaną działać WSZYSTKIE drukarki oraz "Microsoft Print to PDF".' 'Opcjonalne' 'auto'
+    Nowa-Usluga 'PrintNotify'      'Drukarki i skanery' 'Powiadomienia drukarek' 'Brak powiadomień i rozszerzeń sterowników drukarek.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'StiSvc'           'Drukarki i skanery' 'Pozyskiwanie obrazów (WIA)' 'Obsługa skanerów i aparatów. Przestaną działać skanery!' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WiaRpc'           'Drukarki i skanery' 'Zdarzenia skanerów i aparatów' 'Uruchamia programy po podłączeniu aparatu lub skanera.' 'Opcjonalne' 'demand'
+
+    # --- Siec i udostepnianie ---
+    Nowa-Usluga 'lltdsvc'          'Sieć' 'Mapa sieci (LLTD)'                    'Rysuje mapę sieci w Panelu sterowania. Rzadko używane.' 'Zalecane' 'demand'
+    Nowa-Usluga 'SNMPTRAP'         'Sieć' 'Pułapka SNMP'                         'Odbiera komunikaty SNMP z urządzeń sieciowych. W domu nieużywane.' 'Zalecane' 'demand'
+    Nowa-Usluga 'MSiSCSI'          'Sieć' 'Inicjator iSCSI'                      'Podłączanie dysków sieciowych iSCSI (serwerownie). W domu nieużywane.' 'Zalecane' 'demand'
+    Nowa-Usluga 'LanmanServer'     'Sieć' 'Serwer (udostępnianie plików)'        'Udostępnianie folderów i drukarek z TEGO komputera innym. Jeśli nic nie udostępnia, wyłączenie podnosi bezpieczeństwo.' 'Opcjonalne' 'auto'
+    Nowa-Usluga 'FDResPub'         'Sieć' 'Widoczność w sieci lokalnej'          'Sprawia, że komputer jest widoczny dla innych w sieci (Eksplorator > Sieć).' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'fdPHost'          'Sieć' 'Wyszukiwanie urządzeń w sieci'        'Wyszukuje komputery i urządzenia w sieci lokalnej.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SSDPSRV'          'Sieć' 'Odnajdowanie SSDP (UPnP)'             'Wykrywa telewizory, drukarki sieciowe i serwery DLNA.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'upnphost'         'Sieć' 'Host urządzeń UPnP'                   'Udostępnia urządzenia UPnP z tego komputera.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'lmhosts'          'Sieć' 'Pomocnik NetBIOS'                     'Stary mechanizm nazw w sieci Windows. Może być potrzebny do starszych NAS-ów i dysków sieciowych.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SharedAccess'     'Sieć' 'Udostępnianie internetu (ICS)'        'Udostępnianie internetu z tego komputera innym urządzeniom.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'icssvc'           'Sieć' 'Mobilny hotspot'                      'Nie da się udostępnić internetu z tego komputera jako hotspot Wi-Fi.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'iphlpsvc'         'Sieć' 'Pomocnik IP (IPv6)'                   'Tunelowanie IPv6 (Teredo i inne). Wyłączenie może zepsuć niektóre VPN-y i gry sieciowe Xbox.' 'Opcjonalne' 'auto'
+    Nowa-Usluga 'WebClient'        'Sieć' 'Klient WebDAV'                        'Dyski internetowe przez WebDAV (np. SharePoint). Często wykorzystywany w atakach - wyłącz, jeśli nieużywany.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'QWAVE'            'Sieć' 'Jakość audio-wideo w sieci (qWave)'   'Priorytet dla strumieni audio i wideo w sieci domowej. Rzadko używane.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WFDSConMgrSvc'    'Sieć' 'Wi-Fi Direct'                         'Połączenia Wi-Fi Direct: niektóre drukarki i bezprzewodowe wyświetlacze.' 'Opcjonalne' 'demand'
+
+    # --- Zdalny dostep ---
+    Nowa-Usluga 'RemoteRegistry'   'Zdalny dostęp' 'Zdalny rejestr'              'Pozwala zmieniać rejestr przez sieć. Ryzyko bezpieczeństwa.' 'Zalecane' 'disabled'
+    Nowa-Usluga 'TermService'      'Zdalny dostęp' 'Pulpit zdalny (RDP)'         'Nikt nie połączy się z tym komputerem przez Pulpit zdalny.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SessionEnv'       'Zdalny dostęp' 'Konfiguracja Pulpitu zdalnego' 'Pomocnicza usługa Pulpitu zdalnego.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'UmRdpService'     'Zdalny dostęp' 'Przekierowania Pulpitu zdalnego' 'Drukarki i dyski w sesjach Pulpitu zdalnego.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WinRM'            'Zdalny dostęp' 'Zdalne zarządzanie (WinRM)'  'Zdalne polecenia PowerShell. W domu zbędne; w firmie może być używane przez dział IT.' 'Opcjonalne' 'demand'
+
+    # --- Urzadzenia ---
+    Nowa-Usluga 'bthserv'          'Urządzenia' 'Bluetooth'                     'Przestaną działać słuchawki, myszki i inne urządzenia Bluetooth.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'BthAvctpSvc'      'Urządzenia' 'Bluetooth - sterowanie audio'  'Przyciski i sterowanie odtwarzaniem w słuchawkach Bluetooth.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WbioSrvc'         'Urządzenia' 'Biometria (Windows Hello)'     'Logowanie odciskiem palca i twarzą przestanie działać.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SCardSvr'         'Urządzenia' 'Karty inteligentne'            'Czytniki kart: e-dowód, podpis kwalifikowany i karty firmowe przestaną działać!' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SensorService'    'Urządzenia' 'Czujniki'                      'Obracanie ekranu i automatyczna jasność w laptopach i tabletach. Na komputerze stacjonarnym zbędne.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SensrSvc'         'Urządzenia' 'Monitorowanie czujników'       'Jak wyżej - czujniki w laptopach i tabletach.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SensorDataService' 'Urządzenia' 'Dane czujników'               'Jak wyżej - czujniki w laptopach i tabletach.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'WwanSvc'          'Urządzenia' 'Modem komórkowy (LTE/5G)'      'Wbudowany modem komórkowy w laptopie przestanie działać.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'wlpasvc'          'Urządzenia' 'Profile eSIM'                  'Obsługa kart eSIM w laptopach z modemem.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SEMgrSvc'         'Urządzenia' 'Płatności i NFC'               'Płatności zbliżeniowe NFC w urządzeniu. W komputerach praktycznie nieużywane.' 'Zalecane' 'demand'
+    Nowa-Usluga 'NaturalAuthentication' 'Urządzenia' 'Blokada dynamiczna'       'Automatyczne blokowanie komputera, gdy sparowany telefon się oddali.' 'Opcjonalne' 'demand'
+
+    # --- Telefon ---
+    Nowa-Usluga 'PhoneSvc'         'Telefon' 'Usługa telefonu'                  'Stan telefonii: Łącze z telefonem, połączenia VoIP.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'SmsRouter'        'Telefon' 'Router SMS'                       'SMS-y w aplikacji Łącze z telefonem.' 'Opcjonalne' 'demand'
+    Nowa-Usluga 'autotimesvc'      'Telefon' 'Czas z sieci komórkowej'          'Ustawia czas na podstawie sieci komórkowej (laptopy z modemem).' 'Opcjonalne' 'demand'
+
+    # --- Mixed Reality / VR ---
+    Nowa-Usluga 'spectrum'         'Mixed Reality' 'Windows Perception'         'Obsługa gogli Windows Mixed Reality.' 'Zalecane' 'demand'
+    Nowa-Usluga 'perceptionsimulation' 'Mixed Reality' 'Symulacja Perception'   'Symulator Mixed Reality dla programistów.' 'Zalecane' 'demand'
+    Nowa-Usluga 'MixedRealityOpenXRSvc' 'Mixed Reality' 'Mixed Reality OpenXR'  'Gogle Windows Mixed Reality w OpenXR (nie dotyczy gogli Meta/Valve na SteamVR).' 'Zalecane' 'demand'
+    Nowa-Usluga 'SharedRealitySvc' 'Mixed Reality' 'Dane przestrzenne'          'Dane przestrzenne dla Mixed Reality.' 'Zalecane' 'demand'
+
+    # --- Lokalizacja i mapy ---
+    Nowa-Usluga 'MapsBroker'       'Lokalizacja i mapy' 'Mapy offline'          'Pobiera i aktualizuje mapy dla aplikacji Mapy.' 'Zalecane' 'delayed-auto'
+    Nowa-Usluga 'lfsvc'            'Lokalizacja i mapy' 'Lokalizacja'           'Pogoda, mapy i "Znajdź moje urządzenie" nie ustalą położenia.' 'Opcjonalne' 'demand'
+
+    # --- Wydajnosc ---
+    Nowa-Usluga 'WSearch'          'Wydajność' 'Indeksowanie wyszukiwania'       'Wyszukiwanie w menu Start, Eksploratorze i Outlooku będzie wolniejsze.' 'Opcjonalne' 'delayed-auto'
+    Nowa-Usluga 'SysMain'          'Wydajność' 'SysMain (Superfetch)'            'Wstępne ładowanie programów. Na SSD zwykle zbędne, na HDD lepiej zostawić.' 'Opcjonalne' 'auto'
+    Nowa-Usluga 'TrkWks'           'Wydajność' 'Śledzenie łączy rozproszonych'   'Naprawia skróty do plików przeniesionych w sieci firmowej. W domu zbędne.' 'Opcjonalne' 'auto'
+
+    # --- Firmowe ---
+    Nowa-Usluga 'workfolderssvc'   'Firmowe' 'Foldery robocze'                  'Synchronizacja z firmowym serwerem plików. W domu nieużywane.' 'Zalecane' 'demand'
+    Nowa-Usluga 'Wecsvc'           'Firmowe' 'Zbieranie zdarzeń'                'Zbiera dzienniki zdarzeń z innych komputerów (firmowe serwery).' 'Zalecane' 'demand'
+    Nowa-Usluga 'CscService'       'Firmowe' 'Pliki trybu offline'              'Kopie offline plików z firmowych udziałów sieciowych.' 'Opcjonalne' 'demand'
+
+    # --- Inne ---
+    Nowa-Usluga 'RetailDemo'       'Inne' 'Tryb demo sklepu'                    'Tryb pokazowy dla komputerów wystawionych w sklepie.' 'Zalecane' 'demand'
+    Nowa-Usluga 'wisvc'            'Inne' 'Windows Insider'                     'Obsługa testowych wersji Windows.' 'Zalecane' 'demand'
+    Nowa-Usluga 'AJRouter'         'Inne' 'AllJoyn Router'                      'Komunikacja z urządzeniami IoT (praktycznie nieużywana).' 'Zalecane' 'demand'
+    Nowa-Usluga 'WMPNetworkSvc'    'Inne' 'Udostępnianie Windows Media Player'  'Udostępnia bibliotekę multimediów innym urządzeniom w sieci.' 'Zalecane' 'demand'
+    Nowa-Usluga 'AxInstSV'         'Inne' 'Instalator ActiveX'                  'Instalowanie kontrolek ActiveX ze stron (przestarzałe).' 'Zalecane' 'demand'
+    Nowa-Usluga 'WalletService'    'Inne' 'Portfel Windows'                     'Usługa portfela, nieużywana przez zwykłe programy.' 'Zalecane' 'demand'
+    Nowa-Usluga 'WpcMonSvc'        'Inne' 'Kontrola rodzicielska'               'Nie wyłączaj, jeśli dzieci mają konta w Microsoft Family.' 'Opcjonalne' 'demand'
 )
 
 # =====================================================================
@@ -192,7 +266,9 @@ function Dodaj-Kolumne($siatka, [string]$typ, [string]$tytul, [int]$szerokosc) {
 function Nowy-PanelPrzyciskow {
     $p = New-Object System.Windows.Forms.FlowLayoutPanel
     $p.Dock = 'Bottom'
-    $p.Height = 50
+    $p.AutoSize = $true
+    $p.AutoSizeMode = 'GrowAndShrink'
+    $p.WrapContents = $true
     $p.Padding = New-Object System.Windows.Forms.Padding(6, 8, 6, 4)
     $p
 }
@@ -610,11 +686,12 @@ $logBox.Font = New-Object System.Drawing.Font('Consolas', 9)
 # ---------- Uslugi ----------
 $siatkaU = Nowa-Siatka
 Dodaj-Kolumne $siatkaU 'Check' 'Wybierz' 70
-Dodaj-Kolumne $siatkaU 'Text' 'Usługa' 240
+Dodaj-Kolumne $siatkaU 'Text' 'Usługa' 230
+Dodaj-Kolumne $siatkaU 'Text' 'Kategoria' 120
 Dodaj-Kolumne $siatkaU 'Text' 'Co robi / co przestanie działać' 0
 Dodaj-Kolumne $siatkaU 'Text' 'Rodzaj' 95
-Dodaj-Kolumne $siatkaU 'Text' 'Stan' 90
-Dodaj-Kolumne $siatkaU 'Text' 'Uruchamianie' 170
+Dodaj-Kolumne $siatkaU 'Text' 'Stan' 85
+Dodaj-Kolumne $siatkaU 'Text' 'Uruchamianie' 160
 
 $panelU = Nowy-PanelPrzyciskow
 $lblTryb = New-Object System.Windows.Forms.Label
@@ -636,10 +713,19 @@ $btnOdznaczU = Nowy-Przycisk $panelU 'Odznacz wszystko' $false
 $btnDomyslne = Nowy-Przycisk $panelU 'Przywróć domyślne zaznaczonych' $false
 $btnKopia    = Nowy-Przycisk $panelU 'Przywróć z kopii...' $false
 $btnFolder   = Nowy-Przycisk $panelU 'Folder kopii' $false
+$lblSzukaj = New-Object System.Windows.Forms.Label
+$lblSzukaj.Text = 'Szukaj:'
+$lblSzukaj.AutoSize = $true
+$lblSzukaj.Margin = New-Object System.Windows.Forms.Padding(14, 9, 2, 0)
+[void]$panelU.Controls.Add($lblSzukaj)
+$txtSzukaj = New-Object System.Windows.Forms.TextBox
+$txtSzukaj.Width = 200
+$txtSzukaj.Margin = New-Object System.Windows.Forms.Padding(2, 6, 8, 0)
+[void]$panelU.Controls.Add($txtSzukaj)
 
 $tabUslugi = Nowa-Zakladka 'Usługi' $siatkaU ('Zaznacz usługi, wybierz Wyłączony albo Ręczny i kliknij "Zastosuj do zaznaczonych". ' +
     'Zalecane (zielone) są bezpieczne i zaznaczone od razu. Opcjonalne (pomarańczowe) zaznacz tylko, jeśli klient z nich nie korzysta. ' +
-    'Przed zmianą tworzony jest punkt przywracania i kopia ustawień.') $panelU
+    'Przed zmianą tworzony jest punkt przywracania i kopia ustawień. Pole "Szukaj" filtruje po nazwie, kategorii i opisie (np. drukark, bluetooth, sieć).') $panelU
 
 # ---------- Autostart ----------
 $siatkaA = Nowa-Siatka
@@ -725,18 +811,32 @@ function Wypelnij-Uslugi {
         if (-not $si) { continue }
         $wylaczona = ($si.Start -eq 4)
         $zaznacz = (($u.Rodzaj -eq 'Zalecane') -and (-not $wylaczona))
-        $idx = $siatkaU.Rows.Add($zaznacz, ($u.Etykieta + $NL + $u.Nazwa), $u.Opis, $u.Rodzaj,
+        $idx = $siatkaU.Rows.Add($zaznacz, ($u.Etykieta + $NL + $u.Nazwa), $u.Kategoria, $u.Opis, $u.Rodzaj,
             (Stan-PL $svc.Status), (Opis-Startu $si.Start $si.Delayed))
         $wiersz = $siatkaU.Rows[$idx]
         $wiersz.Tag = $u
-        if ($u.Rodzaj -eq 'Zalecane') { $wiersz.Cells[3].Style.ForeColor = Kolor 'OK' }
-        else { $wiersz.Cells[3].Style.ForeColor = Kolor 'UWAGA' }
+        if ($u.Rodzaj -eq 'Zalecane') { $wiersz.Cells[4].Style.ForeColor = Kolor 'OK' }
+        else { $wiersz.Cells[4].Style.ForeColor = Kolor 'UWAGA' }
         if ($wylaczona) {
-            $wiersz.Cells[4].Style.ForeColor = Kolor 'Wyłączony'
             $wiersz.Cells[5].Style.ForeColor = Kolor 'Wyłączony'
+            $wiersz.Cells[6].Style.ForeColor = Kolor 'Wyłączony'
         }
     }
+    Filtruj-Uslugi
 }
+
+function Filtruj-Uslugi {
+    $fraza = $txtSzukaj.Text.Trim()
+    $siatkaU.CurrentCell = $null
+    foreach ($r in $siatkaU.Rows) {
+        $u = $r.Tag
+        if (-not $fraza) { $r.Visible = $true; continue }
+        $tekst = $u.Etykieta + ' ' + $u.Nazwa + ' ' + $u.Kategoria + ' ' + $u.Opis
+        $r.Visible = ($tekst.IndexOf($fraza, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    }
+}
+
+$txtSzukaj.Add_TextChanged({ Filtruj-Uslugi })
 
 $btnZalecane.Add_Click({
     foreach ($r in $siatkaU.Rows) {
