@@ -25,6 +25,7 @@ $TrybPodgladu=1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/u
 Poprzednie wersje, gdyby nowa sprawiała kłopoty (uruchom z PowerShella jako administrator):
 
 ```powershell
+irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-42/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-41/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-4/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | iex
@@ -50,14 +51,18 @@ irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | i
 - **Ustawienia:** bez reklam i sugestii, bez Binga w menu Start, Recall, Copilota i widżetów, rozszerzenia plików, klasyczne menu, hibernacja, szybkie uruchamianie, plan zasilania. Każde da się cofnąć.
 - **Czyszczenie:** pliki tymczasowe, cache aktualizacji, kosz, przeglądarki, DISM. Pokazuje, ile miejsca zwolniono. Okno **Największe foldery** pokazuje, co zajmuje miejsce.
 - **Naprawy:** DISM, SFC, reset Windows Update, reset sieci, kolejka drukarki, ikony i miniatury, Eksplorator, zegar, sprawdzenie dysku, plany zasilania, Sklep.
-- **Instalacja:** ponad 30 programów przez winget (oficjalne repozytorium Microsoft), pakiety („Podstawowy zestaw”, „Biuro”, „Gracz”, „Diagnostyka”) i aktualizacja wszystkich programów.
+- **Instalacja:** ponad 30 programów przez winget (oficjalne repozytorium Microsoft), pakiety („Podstawowy zestaw”, „Biuro”, „Gracz”, „Diagnostyka”) i aktualizacja wszystkich programów. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje programu z repozytorium i instaluje wybraną, także starszą (z opcją odinstalowania obecnej).
 - **Sprzęt:** dyski (zdrowie, zużycie SSD, temperatura, HDD jako systemowy), RAM i wolne sloty, bateria, karta graficzna, urządzenia bez sterowników, aktywacja, klucz Windows z BIOS, czas uruchamiania.
-- **Sterowniki i BIOS:** zainstalowane sterowniki podzespołów (karta graficzna, sieć, dźwięk, chipset...) i wersja BIOS. „Sprawdź aktualizacje” pyta Windows Update o nowsze sterowniki i firmware, a zaznaczone instaluje. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft Update i instaluje wybraną, także starszą. „Narzędzie producenta” instaluje i uruchamia Dell Command Update, Lenovo System Update, HP Support Assistant albo Intel DSA (aktualizacje BIOS-u).
+- **Sterowniki i BIOS:** zainstalowane sterowniki podzespołów (karta graficzna, sieć, dźwięk, chipset...) i wersja BIOS. „Sprawdź aktualizacje” pyta Windows Update o nowsze sterowniki i firmware, a zaznaczone instaluje. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft Update i instaluje wybraną, także starszą.
+  - **„Szukaj u producenta”** (albo dwuklik na wierszu BIOS) sam rozpoznaje płytę lub laptopa i pobiera listę BIOS-ów i sterowników prosto z serwera producenta: **MSI, Gigabyte, ASUS, Lenovo**. Pokazuje wersje, daty, rozmiary i to, co jest nowsze od zainstalowanego (także wersje beta i starsze).
+  - Zaznaczone pliki pobiera, sprawdza sumę kontrolną podaną przez producenta i rozpakowuje (gdy trzeba, sam doinstaluje darmowego 7-Zip). Sterowniki instaluje po cichu (pnputil) albo instalatorem producenta. Pakiety Lenovo instaluje tak jak Lenovo System Update.
+  - BIOS płyt głównych (MSI, Gigabyte, ASUS) kopiuje na pendrive i może od razu uruchomić komputer ponownie prosto do BIOS-u. Dalej zostaje M-Flash, Q-Flash albo EZ Flash, z instrukcją w okienku. Laptopy: uruchamia program producenta do aktualizacji BIOS-u.
+  - „Tylko pobierz” zapisuje pliki w folderze Pobrane klienta. Dell i HP: „Narzędzie producenta” instaluje i uruchamia Dell Command Update albo HP Support Assistant (jest też Lenovo System Update i Intel DSA).
 - **Bezpieczeństwo:** antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta. Do tego szybkie naprawy.
 - **Przed reinstalacją:** kopia sterowników, listy programów, informacji o komputerze z kluczem Windows, zakładek przeglądarek i danych użytkownika (Pulpit, Dokumenty, Obrazy, Pobrane, Muzyka, Wideo, także z OneDrive) wybranego konta na pendrive.
 
 We wszystkich zakładkach można sortować, klikając nagłówek kolumny. Pasek na dole pokazuje, ile pozycji jest zaznaczonych. Okno dopasowuje się do małych ekranów laptopów.
 
-Programy pobiera tylko zakładka Instalacja, i to dopiero po kliknięciu. Kopie ustawień, log i lista wykonanych prac są w `C:\ProgramData\UslugiKopia`.
+Programy, sterowniki i BIOS są pobierane tylko z oficjalnych źródeł (winget, Windows Update, katalog Microsoft, serwery producentów) i dopiero po kliknięciu. Kopie ustawień, log i lista wykonanych prac są w `C:\ProgramData\UslugiKopia`.
 
 Domyślnie program i raport nie pokazują żadnej nazwy firmy. Nazwę, telefon i link do opinii Google można ustawić na początku pliku `uslugi.ps1` (`$NazwaSerwisu`, `$TelefonSerwisu`, `$LinkOpinii`).

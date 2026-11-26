@@ -12,20 +12,21 @@
       Ustawienia         - reklamy, Bing, Copilot, Recall, widzety, rozszerzenia plikow, hibernacja... z cofaniem
       Czyszczenie        - pliki tymczasowe, cache aktualizacji, kosz, przegladarki, DISM, najwieksze foldery
       Naprawy            - DISM, SFC, reset Windows Update, sieci, kolejki drukarki, ikon, zegara, sprawdzenie dysku
-      Instalacja         - programy przez winget (oficjalne repozytorium Microsoft) i aktualizacja wszystkich
+      Instalacja         - programy przez winget (oficjalne repozytorium Microsoft), wybor wersji, aktualizacja wszystkich
       Sprzet             - dysk (SMART, zuzycie), RAM i wolne sloty, bateria, sterowniki, klucz Windows, czas startu
-      Sterowniki i BIOS  - zainstalowane sterowniki, aktualizacje z Windows Update (tez firmware), narzedzie producenta
+      Sterowniki i BIOS  - Windows Update, katalog Microsoft (wybor wersji) i pliki prosto od producenta (MSI, Gigabyte, ASUS, Lenovo)
       Bezpieczenstwo     - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta
       Przed reinstalacja - kopia sterownikow, lista programow, klucz, zakladki przegladarek i dane uzytkownika
     Na gorze: Serwis ekspresowy, Raport dla klienta (HTML/PDF), Pomoc zdalna.
-    Sterowniki: aktualizacje z Windows Update, wybor dowolnej wersji z katalogu Microsoft Update, narzedzie producenta (BIOS).
+    Sterowniki: Windows Update, dowolna wersja z katalogu Microsoft Update, BIOS i sterowniki ze strony producenta
+                (pobranie, kontrola sumy, rozpakowanie - w razie potrzeby 7-Zip - i instalacja; BIOS na pendrive + restart do BIOS-u).
 
     Kliknij naglowek kolumny, zeby posortowac. Nic nie jest zaznaczone na starcie.
     Programy pobiera tylko zakladka Instalacja, i to dopiero po kliknieciu. Kopie i log: C:\ProgramData\UslugiKopia
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.2'
+$WersjaNarzedzia = '4.3'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
 $NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
@@ -95,6 +96,7 @@ $stan = @{
     KluczWindows = ''; CzasStartu = $null; PunktUtworzony = $false; Winget = $null; ZainstalowaneWinget = @()
     FolderKopiiDanych = ''; OstatniaKopia = ''; NF = $null; Zajety = 0
     Ja = ''; Klient = $null; InneKonto = $false; Profile = @(); ProfilKopii = $null; Menu = (New-Object System.Collections.ArrayList)
+    WS = $null; PR = $null; WersjeWinget = @{}; Blokada = @{}; Interaktywny = $false
 }
 
 # ---------- kolory ----------
@@ -1860,12 +1862,18 @@ function Sciezka-Winget {
 
 function Pobierz-ZainstalowaneWinget([string]$winget) {
     $plik = Join-Path $env:TEMP ('winget_' + [guid]::NewGuid().ToString('N') + '.json')
-    [void](Uruchom-Program ('"' + $winget + '" export -o "' + $plik + '" --accept-source-agreements') 'sprawdzanie programów')
+    [void](Uruchom-Program ('"' + $winget + '" export -o "' + $plik + '" --include-versions --accept-source-agreements') 'sprawdzanie programów')
     $ids = @()
+    $stan.WersjeWinget = @{}
     if (Test-Path -LiteralPath $plik) {
         try {
             $j = Get-Content -LiteralPath $plik -Raw -Encoding UTF8 | ConvertFrom-Json
-            $ids = @($j.Sources | ForEach-Object { $_.Packages } | ForEach-Object { [string]$_.PackageIdentifier })
+            foreach ($pakiet in @($j.Sources | ForEach-Object { $_.Packages })) {
+                if (-not $pakiet) { continue }
+                $id = [string]$pakiet.PackageIdentifier
+                $ids += $id
+                if ($pakiet.Version) { $stan.WersjeWinget[$id] = [string]$pakiet.Version }
+            }
         } catch { }
         Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
     }
@@ -1881,6 +1889,30 @@ function Opis-KoduWinget([int]$kod, [string]$tekst) {
 
 function Zainstaluj-Program([string]$winget, $program) {
     $w = Uruchom-Program ('"' + $winget + '" install --id "' + $program.Id + '" -e --source winget --silent --accept-package-agreements --accept-source-agreements') ('instalacja ' + $program.Etykieta)
+    Opis-KoduWinget $w.Kod $w.Tekst
+}
+
+# ---------- wybor wersji programu (wszystkie wersje z repozytorium winget) ----------
+function Parsuj-WersjeWinget([string]$tekst) {
+    $wynik = New-Object System.Collections.ArrayList
+    $poKresce = $false
+    foreach ($linia in ($tekst -split "`n")) {
+        # winget rysuje postep z \r - liczy sie tekst po ostatnim \r
+        $t = ($linia.TrimEnd([char]13).Split([char]13) | Select-Object -Last 1).Trim()
+        if (-not $poKresce) { if ($t -match '^-{3,}$') { $poKresce = $true }; continue }
+        if ($t -match '^[0-9A-Za-z][0-9A-Za-z\.\-\+_]*( [0-9A-Za-z\.\-\+_]+)?$' -and $wynik -notcontains $t) { [void]$wynik.Add($t) }
+    }
+    $wynik
+}
+
+function Wersje-Winget([string]$winget, [string]$id) {
+    $w = Uruchom-Program ('"' + $winget + '" show --id "' + $id + '" -e --versions --source winget --accept-source-agreements') 'lista wersji'
+    Parsuj-WersjeWinget $w.Tekst
+}
+
+function Zainstaluj-WersjeProgramu([string]$winget, $program, [string]$wersja) {
+    $polecenie = '"' + $winget + '" install --id "' + $program.Id + '" -e --version "' + $wersja + '" --source winget --silent --force --accept-package-agreements --accept-source-agreements'
+    $w = Uruchom-Program $polecenie ('instalacja ' + $program.Etykieta + ' ' + $wersja)
     Opis-KoduWinget $w.Kod $w.Tekst
 }
 
@@ -2295,7 +2327,7 @@ function Uruchom-Exe([string]$plik, [string]$argumenty, [string]$opis) {
 function Pobierz-Plik([string]$adres, [string]$cel, [string]$plikPost, [string]$opis) {
     $curl = Join-Path $env:windir 'System32\curl.exe'
     if (Test-Path -LiteralPath $curl) {
-        $arg = '-s -L --fail --max-time 3600 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "' + $cel + '"'
+        $arg = '-s -L --fail --retry 2 --connect-timeout 20 --max-time 3600 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" -o "' + $cel + '"'
         if ($plikPost) { $arg = $arg + ' -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@' + $plikPost + '"' }
         $arg = $arg + ' "' + $adres + '"'
         $kod = Uruchom-Exe $curl $arg $opis
@@ -2634,6 +2666,1019 @@ function Zapisz-Raport {
 }
 
 # =====================================================================
+#  STEROWNIKI I BIOS PROSTO OD PRODUCENTA (MSI, Gigabyte, ASUS, Lenovo)
+# =====================================================================
+# Program sam pyta serwery producenta o liste plikow dla tego modelu, pobiera wybrane,
+# sprawdza sumy kontrolne, rozpakowuje (w razie potrzeby 7-Zip) i instaluje.
+$apiGigabyte = 'https://www.gigabyte.com/iisApplicationNuxt/api/proxy/api/v1.0'
+$wykluczoneInstalatory = 'efiflash|^afu|biosrenamer|flashrom|^fptw|amidewin|autoexec|uninst|readme|vcredist|dotnet|ndp\d'
+$rodzajePlikow = @{ 'BIOS' = 0; 'Sterownik' = 1; 'Firmware' = 2; 'Narzędzie' = 3 }
+
+function Info-Komputera {
+    $cs = $null; $pr = $null; $bb = $null; $bios = $null
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop } catch { }
+    try { $pr = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop } catch { }
+    try { $bb = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1 } catch { }
+    try { $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop } catch { }
+    $build = 0
+    try { $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber } catch { }
+    $data = $null
+    if ($bios -and $bios.ReleaseDate) { try { $data = [datetime]$bios.ReleaseDate } catch { } }
+    $laptop = $false
+    if ($cs) { $laptop = ([int]$cs.PCSystemType -eq 2) }
+    [pscustomobject]@{
+        Producent = ([string]$cs.Manufacturer).Trim(); Model = ([string]$cs.Model).Trim(); Rodzina = ([string]$pr.Version).Trim()
+        Laptop = $laptop; PlytaProducent = ([string]$bb.Manufacturer).Trim(); Plyta = ([string]$bb.Product).Trim(); PlytaWersja = ([string]$bb.Version).Trim()
+        Bios = ([string]$bios.SMBIOSBIOSVersion).Trim(); BiosData = $data; Win11 = ($build -ge 22000)
+    }
+}
+
+function Wykryj-Producenta($info) {
+    $t = $info.PlytaProducent + ' | ' + $info.Producent
+    if ($t -match 'Micro-Star|\bMSI\b') { return 'MSI' }
+    if ($t -match 'Gigabyte') { return 'Gigabyte' }
+    if ($t -match 'ASUSTeK|\bASUS\b') { return 'ASUS' }
+    if ($t -match 'ASRock') { return 'ASRock' }
+    if ($t -match 'LENOVO') { return 'Lenovo' }
+    if ($t -match 'Dell') { return 'Dell' }
+    if ($t -match 'Hewlett|\bHP\b') { return 'HP' }
+    ''
+}
+
+# ---------- pobieranie list z serwerow producentow ----------
+function Czytaj-Json([string]$tekst) {
+    if (-not $tekst) { return $null }
+    $t = $tekst.Trim()
+    if (-not ($t.StartsWith('{') -or $t.StartsWith('['))) { return $null }
+    try { return (ConvertFrom-Json -InputObject $t -ErrorAction Stop) } catch { }
+    try {
+        # zapasowo: duze odpowiedzi albo klucze rozniace sie tylko wielkoscia liter
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $s = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $s.MaxJsonLength = [int]::MaxValue
+        return $s.DeserializeObject($t)
+    } catch { }
+    $null
+}
+
+function Pary($o) {
+    # pary nazwa/wartosc dla obiektu z ConvertFrom-Json albo slownika
+    if ($null -eq $o -or $o -is [string] -or $o -is [array]) { return @() }
+    if ($o -is [System.Collections.IDictionary]) {
+        return @(foreach ($k in @($o.Keys)) { [pscustomobject]@{ Nazwa = [string]$k; Wartosc = $o[$k] } })
+    }
+    @(foreach ($p in $o.PSObject.Properties) { [pscustomobject]@{ Nazwa = $p.Name; Wartosc = $p.Value } })
+}
+
+function Uruchom-ZWyjsciem([string]$plik, [string]$argumenty, [int]$limit, [string]$opis) {
+    # bez okna; wyjscie czytane w tle, wiec okno programu dalej reaguje
+    $tekst = ''; $kod = -1
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $plik
+        $psi.Arguments = $argumenty
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $wyjscie = $proc.StandardOutput.ReadToEndAsync()
+        [void]$proc.StandardError.ReadToEndAsync()
+        $start = Get-Date
+        while (-not $proc.HasExited) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 150
+            if (((Get-Date) - $start).TotalSeconds -gt $limit) {
+                Log ('  ' + $opis + ': brak odpowiedzi - przerywam.')
+                try { [void](& taskkill.exe /PID $proc.Id /T /F 2>&1) } catch { }
+                break
+            }
+        }
+        if ($wyjscie.Wait(5000)) { $tekst = [string]$wyjscie.Result }
+        if ($proc.HasExited) { $kod = $proc.ExitCode }
+    } catch { }
+    [pscustomobject]@{ Kod = $kod; Tekst = $tekst }
+}
+
+function Sciezka-Przegladarki {
+    foreach ($baza in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
+        if (-not $baza) { continue }
+        foreach ($wzgledna in @('Microsoft\Edge\Application\msedge.exe', 'Google\Chrome\Application\chrome.exe')) {
+            $p = Join-Path $baza $wzgledna
+            if (Test-Path -LiteralPath $p) { return $p }
+        }
+    }
+    $null
+}
+
+function Pobierz-PrzezPrzegladarke([string]$adres, [string]$opis) {
+    # MSI i Gigabyte wpuszczaja tylko prawdziwa przegladarke - Edge w trybie bez okna
+    $exe = Sciezka-Przegladarki
+    if (-not $exe) { return '' }
+    $wersja = 130
+    try { $wersja = [int](([string](Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -split '\.')[0]) } catch { }
+    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + $wersja + '.0.0.0 Safari/537.36'
+    if ($exe -like '*msedge.exe') { $ua = $ua + ' Edg/' + $wersja + '.0.0.0' }
+    $profil = Join-Path $env:TEMP ('serwis_przegladarka_' + [guid]::NewGuid().ToString('N'))
+    $arg = '--headless=new --disable-gpu --no-first-run --no-default-browser-check --disable-extensions --disable-sync --mute-audio ' +
+        '--user-data-dir="' + $profil + '" --user-agent="' + $ua + '" --dump-dom "' + $adres + '"'
+    $w = Uruchom-ZWyjsciem $exe $arg 90 $opis
+    Start-Sleep -Milliseconds 300
+    Remove-Item -LiteralPath $profil -Recurse -Force -ErrorAction SilentlyContinue
+    [string]$w.Tekst
+}
+
+function Pobierz-Tekst([string]$adres, [string]$opis) {
+    $plik = Join-Path $env:TEMP ('serwis_web_' + [guid]::NewGuid().ToString('N') + '.txt')
+    $tekst = ''
+    if (Pobierz-Plik $adres $plik '' $opis) { try { $tekst = [IO.File]::ReadAllText($plik, [System.Text.Encoding]::UTF8) } catch { } }
+    Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    $tekst
+}
+
+function Json-ZeStrony([string]$html) {
+    # przegladarka pokazuje JSON jako <pre>...</pre> (z kodowaniem HTML)
+    $m = [regex]::Match($html, '<pre[^>]*>([\s\S]*?)</pre>')
+    if ($m.Success) { return (Czytaj-Json ([System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value))) }
+    Czytaj-Json $html
+}
+
+function Pobierz-Json([string]$adres, [string]$opis) {
+    # najpierw zwykle zapytanie; gdy serwer go nie wpuszcza, dalej od razu przez przegladarke
+    if (-not $stan.Blokada) { $stan.Blokada = @{} }
+    $host1 = ''
+    try { $host1 = ([uri]$adres).Host } catch { }
+    if (-not $stan.Blokada.ContainsKey($host1)) {
+        $j = Czytaj-Json (Pobierz-Tekst $adres $opis)
+        if ($null -ne $j) { return $j }
+        $stan.Blokada[$host1] = $true
+    }
+    $html = Pobierz-PrzezPrzegladarke $adres $opis
+    if ($html) { return (Json-ZeStrony $html) }
+    $null
+}
+
+# ---------- opis pojedynczego pliku od producenta ----------
+function Data-Z([string]$t) {
+    if (-not $t) { return $null }
+    $t = $t.Trim()
+    $krotka = $t
+    if ($t.Length -ge 10) { $krotka = $t.Substring(0, 10) }
+    $krotka = $krotka.Replace('/', '-').Replace('.', '-')
+    $d = [datetime]::MinValue
+    foreach ($f in @('yyyy-MM-dd', 'dd-MM-yyyy', 'MM-dd-yyyy')) {
+        if ([datetime]::TryParseExact($krotka, $f, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+    }
+    $null
+}
+
+function Tekst-ZHtml([string]$html) {
+    if (-not $html) { return '' }
+    $t = $html -replace '(?i)</li>\s*<li[^>]*>', '; ' -replace '(?i)<br\s*/?>', '; '
+    $t = Tekst-Komorki $t
+    ($t -replace '^[;\s]+', '' -replace '[;\s]+$', '')
+}
+
+function Bajty-ZTekstu($t) {
+    if ($null -eq $t) { return [long]0 }
+    $s = ([string]$t).Trim()
+    $n = [long]0
+    if ([long]::TryParse($s, [ref]$n)) { return $n }
+    $m = [regex]::Match($s, '([\d.,]+)\s*(KB|MB|GB|B)', 'IgnoreCase')
+    if (-not $m.Success) { return [long]0 }
+    $liczba = 0.0
+    [void][double]::TryParse($m.Groups[1].Value.Replace(',', '.'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$liczba)
+    $mnoznik = @{ 'B' = 1; 'KB' = 1KB; 'MB' = 1MB; 'GB' = 1GB }[$m.Groups[2].Value.ToUpper()]
+    [long]($liczba * $mnoznik)
+}
+
+function Nowy-PlikProducenta([string]$rodzaj, [string]$kategoria, [string]$nazwa, [string]$wersja, $data, [long]$bajty, [string]$adres, [string]$opis) {
+    $w = 9
+    if ($rodzajePlikow.ContainsKey($rodzaj)) { $w = $rodzajePlikow[$rodzaj] }
+    $dni = 0
+    if ($data) { $dni = [int](([datetime]$data) - [datetime]'2000-01-01').TotalDays }
+    $ticks = [long]0
+    if ($data) { $ticks = ([datetime]$data).Ticks }
+    [pscustomobject]@{ Rodzaj = $rodzaj; Kategoria = $kategoria; Nazwa = $nazwa; Wersja = $wersja; WersjaPor = $wersja; Data = $data; DataSort = $ticks
+        Bajty = $bajty; Adres = $adres; Opis = $opis; Sha256 = ''; Md5 = ''; Beta = $false; Zainstalowany = ''; Por = $null
+        Lenovo = $null; Waga = ($w * 100000 + (100000 - $dni)) }
+}
+
+function Nowy-WynikProducenta([string]$producent, $info) {
+    [pscustomobject]@{ Producent = $producent; Model = ''; Strona = ''; Pliki = (New-Object System.Collections.ArrayList); Uwagi = ''
+        Kandydaci = @(); Wybrany = 0; Info = $info; BiosPor = $info.Bios }
+}
+
+function Normalizuj-Wersje([string]$w) {
+    if (-not $w) { return '' }
+    (($w.ToUpper() -replace '\(BETA[^)]*\)', '') -replace '[^0-9A-Z]', '')
+}
+
+function Normalizuj-Nazwe([string]$n) { ($n.ToUpper() -replace '[^0-9A-Z]', '') }
+
+function Porownaj-ZZainstalowana($p, [string]$zainstalowana, $dataZainstalowanej) {
+    # 1 = nowsza, 0 = ta sama, -1 = starsza, $null = nie wiadomo
+    if (-not $zainstalowana) { return $null }
+    $a = Normalizuj-Wersje $p.WersjaPor
+    $b = Normalizuj-Wersje $zainstalowana
+    if ($a -and $a -eq $b) { return 0 }
+    $va = $null; $vb = $null
+    try { $va = [version]([string]$p.WersjaPor).Trim(); $vb = [version]$zainstalowana.Trim() } catch { }
+    if ($va -and $vb) { return $va.CompareTo($vb) }
+    if ($p.Data -and $dataZainstalowanej) {
+        if (([datetime]$p.Data).Date -gt ([datetime]$dataZainstalowanej).Date) { return 1 }
+        return -1
+    }
+    if ($a -and $b) { return [math]::Sign([string]::CompareOrdinal($a, $b)) }
+    $null
+}
+
+# ---------- MSI ----------
+function Slug-MSI([string]$nazwa) {
+    $n = ($nazwa -replace '\(MS-[0-9A-Z]+\)', '') -replace '[^A-Za-z0-9\-\+ ]', ' '
+    ($n.Trim() -replace '\s+', '-')
+}
+
+function Wpisy-MSI($dane) {
+    $wynik = New-Object System.Collections.ArrayList
+    if ($null -eq $dane -or $null -eq $dane.result) { return $wynik }
+    foreach ($para in (Pary $dane.result.downloads)) {
+        if ($para.Nazwa -eq 'type_title' -or $para.Nazwa -eq 'os') { continue }
+        foreach ($e in @($para.Wartosc)) {
+            if ($null -eq $e -or $e -is [string] -or -not $e.download_url) { continue }
+            [void]$wynik.Add([pscustomobject]@{ Kategoria = $para.Nazwa; Wpis = $e })
+        }
+    }
+    $wynik
+}
+
+function Plik-ZWpisuMSI($x, [string]$rodzaj, [string]$kod) {
+    $e = $x.Wpis
+    $wersja = ([string]$e.download_version).Trim()
+    $beta = ($wersja -match '(?i)beta')
+    $czysta = ($wersja -replace '(?i)\s*\(beta[^)]*\)', '').Trim()
+    if ($rodzaj -eq 'BIOS') { $nazwa = 'BIOS ' + $czysta } else { $nazwa = ([string]$e.download_title).Trim() }
+    if (-not $nazwa) { $nazwa = [string]$e.download_file }
+    $p = Nowy-PlikProducenta $rodzaj $x.Kategoria $nazwa $czysta (Data-Z ([string]$e.download_release)) (Bajty-ZTekstu $e.download_size) ([string]$e.download_url) (Tekst-ZHtml ([string]$e.download_description))
+    $p.Beta = $beta
+    $m = [regex]::Match([string]$e.download_sha256, '[0-9a-fA-F]{64}')
+    if ($m.Success) { $p.Sha256 = $m.Value }
+    if ($rodzaj -eq 'BIOS' -and $kod) {
+        # 7E56v1A85 -> 1A85 (tak samo zapisuje sie wersja w BIOS-ie: 1.A85)
+        $p.WersjaPor = ($czysta -replace ('(?i)^' + [regex]::Escape($kod) + 'v'), '')
+    }
+    $p
+}
+
+function Produkty-MSI($info) {
+    $w = Nowy-WynikProducenta 'MSI' $info
+    $kod = ''
+    if (($info.Plyta + ' ' + $info.Model) -match 'MS-([0-9A-Z]{4})') { $kod = $Matches[1].ToUpper() }
+    $nazwy = @()
+    if ($info.Laptop) { $nazwy = @($info.Model, $info.Plyta) } else { $nazwy = @($info.Plyta, $info.Model) }
+    $slugi = @($nazwy | Where-Object { $_ } | ForEach-Object { Slug-MSI $_ } | Where-Object { $_ -and $_ -notmatch '^MS-[0-9A-Z]+$' -and $_ -notmatch '(?i)filled|default|system' } | Select-Object -Unique)
+    $rodzajStrony = 'Motherboard'
+    if ($info.Laptop) { $rodzajStrony = 'Laptop' }
+    $os = 'Win10 64'
+    if ($info.Win11) { $os = 'Win11 64' }
+    foreach ($slug in $slugi) {
+        $baza = 'https://www.msi.com/api/v1/product/support/panel?product=' + [uri]::EscapeDataString($slug)
+        $wpisyB = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=bios') 'MSI: lista BIOS'))
+        $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver&os=' + [uri]::EscapeDataString($os)) 'MSI: lista sterowników'))
+        if ($wpisyS.Count -eq 0 -and $wpisyB.Count -gt 0) { $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver') 'MSI: lista sterowników')) }
+        if ($wpisyB.Count -eq 0 -and $wpisyS.Count -eq 0) { continue }
+        $w.Model = $slug.Replace('-', ' ')
+        $w.Strona = 'https://www.msi.com/' + $rodzajStrony + '/' + $slug + '/support'
+        $pominiete = 0
+        foreach ($x in $wpisyB) {
+            if ($kod -and ([string]$x.Wpis.download_version) -notlike ($kod + 'v*')) { $pominiete++; continue }
+            [void]$w.Pliki.Add((Plik-ZWpisuMSI $x 'BIOS' $kod))
+        }
+        if ($pominiete -gt 0) { $w.Uwagi = 'Pominięto ' + $pominiete + ' plików BIOS dla innej płyty niż MS-' + $kod + '.' }
+        $kodOs = 'Win10'
+        if ($info.Win11) { $kodOs = 'Win11' }
+        foreach ($x in $wpisyS) {
+            $systemy = [string]$x.Wpis.os
+            if ($systemy -and $systemy -ne 'False' -and $systemy -notmatch $kodOs) { continue }
+            [void]$w.Pliki.Add((Plik-ZWpisuMSI $x 'Sterownik' $kod))
+        }
+        return $w
+    }
+    $w.Uwagi = 'MSI nie zwróciło listy dla tego modelu (' + ($slugi -join ', ') + '). Otwórz stronę producenta.'
+    $w.Strona = 'https://www.msi.com/search/' + [uri]::EscapeDataString([string]($nazwy | Where-Object { $_ } | Select-Object -First 1))
+    $w
+}
+
+# ---------- Gigabyte ----------
+function Kandydaci-Gigabyte($info, $produkty) {
+    $cel = Normalizuj-Nazwe $info.Plyta
+    $wynik = @()
+    if (-not $cel) { return $wynik }
+    $wersja = ''
+    if ($info.PlytaWersja -match '^(\d+)\.(\d+)') { $wersja = $Matches[1] + '.' + $Matches[2] }
+    foreach ($p in @($produkty)) {
+        $nazwa = [string]$p.productName
+        if ((Normalizuj-Nazwe ($nazwa -replace '\s*\(rev\.[^)]*\)', '')) -ne $cel) { continue }
+        $pasuje = $false
+        $rev = [regex]::Match($nazwa, '\(rev\.\s*([^)]*)\)')
+        if ($wersja -and $rev.Success) {
+            foreach ($r in ($rev.Groups[1].Value -split '[/,]')) {
+                $r = $r.Trim()
+                if ($r -eq $wersja -or ($r -match '^(\d+)\.x$' -and $wersja.StartsWith($Matches[1] + '.'))) { $pasuje = $true }
+            }
+        }
+        $wynik += [pscustomobject]@{ Nazwa = $nazwa; Klucz = [string]$p.productId; Pasuje = $pasuje }
+    }
+    @(@($wynik | Where-Object { $_.Pasuje }) + @($wynik | Where-Object { -not $_.Pasuje }))
+}
+
+function Pliki-Gigabyte($dane, $info) {
+    $lista = New-Object System.Collections.ArrayList
+    $systemOk = 'Windows 10'
+    if ($info.Win11) { $systemOk = 'Windows 11' }
+    foreach ($tab in @($dane.data)) {
+        if ($null -eq $tab -or [string]$tab.key -ne 'download') { continue }
+        foreach ($kat in @($tab.child)) {
+            if ($null -eq $kat) { continue }
+            $rodzaj = ''
+            switch ([string]$kat.key) { 'bios' { $rodzaj = 'BIOS' } 'driver' { $rodzaj = 'Sterownik' } 'firmware' { $rodzaj = 'Firmware' } 'utility' { $rodzaj = 'Narzędzie' } }
+            if (-not $rodzaj) { continue }
+            foreach ($e in @($kat.data)) {
+                if ($null -eq $e -or -not $e.filePath) { continue }
+                $systemy = @(@($e.info) | Where-Object { $_ -and [int]$_.infoParentId -eq 35 } | ForEach-Object { [string]$_.infoName })
+                if ($systemy.Count -gt 0 -and -not @($systemy | Where-Object { $_ -match $systemOk }).Count) { continue }
+                $kategoria = (@(@($e.info) | Where-Object { $_ -and [int]$_.infoParentId -eq 32 } | ForEach-Object { [string]$_.infoName }) -join ', ')
+                $wersja = ([string]$e.fileVersion).Trim()
+                $opis = Tekst-ZHtml ([string]$e.fileDescription)
+                if ($rodzaj -eq 'BIOS') { $nazwa = 'BIOS ' + $wersja } else { $nazwa = $opis; $opis = '' }
+                if (-not $nazwa) { $nazwa = [string]$e.fileName }
+                $p = Nowy-PlikProducenta $rodzaj $kategoria $nazwa $wersja (Data-Z ([string]$e.fileReleaseDate)) (Bajty-ZTekstu $e.fileSize) ([string]$e.filePath) $opis
+                $p.Beta = (($wersja -match '(?i)beta') -or ($rodzaj -eq 'BIOS' -and $wersja -cmatch '^F\d+[a-z]$'))
+                $m = [regex]::Match([string]$e.filePath, '[?&]v=([0-9a-fA-F]{32})')
+                if ($m.Success) { $p.Md5 = $m.Groups[1].Value }
+                [void]$lista.Add($p)
+            }
+        }
+    }
+    $lista
+}
+
+function Produkty-Gigabyte($info, [int]$wybrany) {
+    $w = Nowy-WynikProducenta 'Gigabyte' $info
+    $j = Pobierz-Json ($apiGigabyte + '/Support/global/DownloadCenter/2/GetProducts') 'Gigabyte: lista płyt'
+    if ($null -eq $j) {
+        $w.Uwagi = 'Serwer Gigabyte nie odpowiedział (brak internetu albo blokada).'
+        $w.Strona = 'https://www.gigabyte.com/Search?kw=' + [uri]::EscapeDataString($info.Plyta)
+        return $w
+    }
+    $w.Kandydaci = @(Kandydaci-Gigabyte $info $j.data)
+    if ($w.Kandydaci.Count -eq 0) {
+        $w.Uwagi = 'Nie znaleziono płyty "' + $info.Plyta + '" na liście Gigabyte.'
+        $w.Strona = 'https://www.gigabyte.com/Search?kw=' + [uri]::EscapeDataString($info.Plyta)
+        return $w
+    }
+    if ($wybrany -lt 0 -or $wybrany -ge $w.Kandydaci.Count) { $wybrany = 0 }
+    $w.Wybrany = $wybrany
+    $k = $w.Kandydaci[$wybrany]
+    $w.Model = $k.Nazwa
+    $slug = (($k.Nazwa -replace '[().]', '').Trim() -replace '\s+', '-')
+    $w.Strona = 'https://www.gigabyte.com/Motherboard/' + $slug + '/support'
+    $dane = Pobierz-Json ($apiGigabyte + '/Consumer/global/GetProductTabDataAsync/Support/' + $k.Klucz) 'Gigabyte: pliki płyty'
+    foreach ($p in (Pliki-Gigabyte $dane $info)) { [void]$w.Pliki.Add($p) }
+    if ($w.Kandydaci.Count -gt 1 -and -not $k.Pasuje) { $w.Uwagi = 'Kilka wersji (rev.) tej płyty - sprawdź na naklejce płyty i wybierz właściwą w polu "Model".' }
+    $w
+}
+
+# ---------- ASUS ----------
+function Pliki-ASUS($dane, [bool]$bios) {
+    $lista = New-Object System.Collections.ArrayList
+    if ($null -eq $dane -or $null -eq $dane.Result) { return $lista }
+    foreach ($grupa in @($dane.Result.Obj)) {
+        if ($null -eq $grupa) { continue }
+        $kategoria = [string]$grupa.Name
+        foreach ($e in @($grupa.Files)) {
+            if ($null -eq $e) { continue }
+            $adres = ''
+            if ($e.DownloadUrl) { $adres = [string]$e.DownloadUrl.Global }
+            if (-not $adres) { continue }
+            if ($adres.StartsWith('/')) { $adres = 'https://dlcdnets.asus.com' + $adres }
+            if ($bios) {
+                if ($kategoria -match '(?i)bios') { $rodzaj = 'BIOS' } else { $rodzaj = 'Firmware' }
+            } elseif ($kategoria -match '(?i)utilit|software') { $rodzaj = 'Narzędzie' } else { $rodzaj = 'Sterownik' }
+            $wersja = ([string]$e.Version).Trim()
+            $nazwa = ([string]$e.Title).Trim()
+            if (-not $nazwa) { $nazwa = $kategoria + ' ' + $wersja }
+            $p = Nowy-PlikProducenta $rodzaj $kategoria $nazwa $wersja (Data-Z ([string]$e.ReleaseDate)) (Bajty-ZTekstu $e.FileSize) $adres (Tekst-ZHtml ([string]$e.Description))
+            $sha = ([string]$e.sha256).Trim()
+            if ($sha -match '^[0-9a-fA-F]{64}$') { $p.Sha256 = $sha }
+            $p.Beta = ([string]$e.IsRelease -eq '0') -or ($nazwa -match '(?i)beta')
+            [void]$lista.Add($p)
+        }
+    }
+    $lista
+}
+
+function Produkty-ASUS($info) {
+    $w = Nowy-WynikProducenta 'ASUS' $info
+    $modele = @()
+    if ($info.Laptop) {
+        $modele += $info.Plyta
+        $ostatni = (($info.Model -split '[_ ]') | Where-Object { $_ } | Select-Object -Last 1)
+        $modele += $ostatni
+    } else { $modele += $info.Plyta }
+    $modele = @($modele | Where-Object { $_ -and $_ -notmatch '(?i)filled|default|system product' } | Select-Object -Unique)
+    $osid = 45
+    if ($info.Win11) { $osid = 52 }
+    foreach ($m in $modele) {
+        $e = [uri]::EscapeDataString($m)
+        $bazowe = 'https://www.asus.com/support/webapi/ProductV2/'
+        $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=' + $osid) 'ASUS: sterowniki') $false)
+        if ($s.Count -eq 0 -and $osid -ne 52) { $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=52') 'ASUS: sterowniki') $false) }
+        $b = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDBIOS?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=') 'ASUS: BIOS') $true)
+        if ($s.Count -eq 0 -and $b.Count -eq 0) { continue }
+        $w.Model = $m
+        $w.Strona = 'https://www.asus.com/supportonly/' + $e + '/helpdesk_download/'
+        foreach ($p in ($b + $s)) { [void]$w.Pliki.Add($p) }
+        # laptopy: FA507NV.312 -> 312
+        if ($info.Bios -match '^[0-9A-Z]+\.(\d+)$') { $w.BiosPor = $Matches[1] }
+        return $w
+    }
+    $w.Uwagi = 'ASUS nie zwrócił listy dla modelu: ' + ($modele -join ', ') + '.'
+    $w.Strona = 'https://www.asus.com/support/'
+    $w
+}
+
+# ---------- Lenovo ----------
+function Opis-PakietuLenovo([string]$xml, [string]$adres, [string]$kategoria) {
+    $atr = [regex]::Match($xml, '<Package[^>]*\bid="([^"]+)"[^>]*\bversion="([^"]*)"')
+    if (-not $atr.Success) { return $null }
+    $tytul = [regex]::Match($xml, '<Title[^>]*>[\s\S]*?<Desc[^>]*>([^<]+)')
+    $data = [regex]::Match($xml, '<ReleaseDate>([^<]+)</ReleaseDate>')
+    $instalator = [regex]::Match($xml, '<Installer>[\s\S]*?<Name>([^<]+)</Name>')
+    if (-not $instalator.Success) { return $null }
+    $rozmiar = [regex]::Match($xml, '<Installer>[\s\S]*?<Size>(\d+)</Size>')
+    $crc = [regex]::Match($xml, '<Installer>[\s\S]*?<CRC>([0-9a-fA-F]{64})</CRC>')
+    $rozpakuj = [regex]::Match($xml, '<ExtractCommand>([^<]*)</ExtractCommand>')
+    $instalacja = [regex]::Match($xml, '<Install\b([^>]*)>([\s\S]*?)</Install>')
+    $restart = [regex]::Match($xml, '<Reboot\s+type="(\d+)"')
+    $nazwa = $atr.Groups[1].Value
+    if ($tytul.Success) { $nazwa = [System.Net.WebUtility]::HtmlDecode($tytul.Groups[1].Value).Trim() }
+    if ($kategoria -match '(?i)BIOS|UEFI') { $rodzaj = 'BIOS' }
+    elseif ($kategoria -match '(?i)firmware') { $rodzaj = 'Firmware' }
+    elseif ($kategoria -match '(?i)software|utilit|diagnostic|vantage') { $rodzaj = 'Narzędzie' }
+    else { $rodzaj = 'Sterownik' }
+    $folderAdresu = $adres.Substring(0, $adres.LastIndexOf('/') + 1)
+    $bajty = [long]0
+    if ($rozmiar.Success) { $bajty = [long]$rozmiar.Groups[1].Value }
+    $p = Nowy-PlikProducenta $rodzaj $kategoria $nazwa $atr.Groups[2].Value (Data-Z $data.Groups[1].Value) $bajty ($folderAdresu + $instalator.Groups[1].Value.Trim()) ''
+    if ($crc.Success) { $p.Sha256 = $crc.Groups[1].Value }
+    $typ = ''; $polecenie = ''; $kody = '0'
+    if ($instalacja.Success) {
+        $t = [regex]::Match($instalacja.Groups[1].Value, 'type="([^"]*)"')
+        if ($t.Success) { $typ = $t.Groups[1].Value.ToLower() }
+        $rc = [regex]::Match($instalacja.Groups[1].Value, 'rc="([^"]*)"')
+        if ($rc.Success) { $kody = $rc.Groups[1].Value }
+        $c = [regex]::Match($instalacja.Groups[2].Value, '<Cmdline[^>]*>([^<]*)</Cmdline>')
+        if ($c.Success) { $polecenie = [System.Net.WebUtility]::HtmlDecode($c.Groups[1].Value).Trim() }
+    }
+    $r = 0
+    if ($restart.Success) { $r = [int]$restart.Groups[1].Value }
+    $p.Lenovo = [pscustomobject]@{ Rozpakuj = [System.Net.WebUtility]::HtmlDecode($rozpakuj.Groups[1].Value).Trim(); Typ = $typ; Polecenie = $polecenie
+        Kody = $kody; Restart = $r }
+    $p
+}
+
+function Produkty-Lenovo($info) {
+    $w = Nowy-WynikProducenta 'Lenovo' $info
+    $mt = ''
+    if ($info.Model -cmatch '^([0-9][0-9A-Z]{3})') { $mt = $Matches[1] }
+    $w.Strona = 'https://pcsupport.lenovo.com/'
+    if (-not $mt) { $w.Uwagi = 'Nie rozpoznano typu maszyny Lenovo.'; return $w }
+    $w.Model = (($info.Rodzina + ' (' + $info.Model + ')').Trim())
+    $w.Strona = 'https://pcsupport.lenovo.com/search?query=' + $mt
+    $nazwy = @(($mt + '_win11.xml'), ($mt + '_Win11.xml'), ($mt + '_win10.xml'), ($mt + '_Win10.xml'))
+    if (-not $info.Win11) { $nazwy = @(($mt + '_win10.xml'), ($mt + '_Win10.xml'), ($mt + '_win11.xml')) }
+    $katalog = ''
+    foreach ($n in $nazwy) {
+        $t = Pobierz-Tekst ('https://download.lenovo.com/catalog/' + $n) 'Lenovo: katalog'
+        if ($t -match '<package') { $katalog = $t; break }
+    }
+    if (-not $katalog) { $w.Uwagi = 'Lenovo nie ma katalogu dla typu ' + $mt + ' (starsze modele: Lenovo System Update).'; return $w }
+    $pakiety = @([regex]::Matches($katalog, '<package>\s*<location>([^<]+)</location>\s*<category>([^<]*)</category>'))
+    Log ('Lenovo: pakietów w katalogu: ' + $pakiety.Count + ', czytam opisy...')
+    $i = 0
+    foreach ($m in $pakiety) {
+        $i++
+        if ($i % 20 -eq 0) { Log ('  ' + $i + ' / ' + $pakiety.Count + '...') }
+        $adres = $m.Groups[1].Value.Trim()
+        $xml = Pobierz-Tekst $adres 'Lenovo: opis pakietu'
+        if (-not $xml) { continue }
+        $p = Opis-PakietuLenovo $xml $adres ([System.Net.WebUtility]::HtmlDecode($m.Groups[2].Value).Trim())
+        if ($p) { [void]$w.Pliki.Add($p) }
+    }
+    # BIOS Lenovo: N32ET91W (1.67 ) -> 1.67
+    if ($info.Bios -match '\(\s*([\d.]+)\s*\)') { $w.BiosPor = $Matches[1] }
+    $w
+}
+
+# ---------- inni producenci ----------
+function Produkty-Inne($info, [string]$producent) {
+    $w = Nowy-WynikProducenta $producent $info
+    $w.Model = (($info.Producent + ' ' + $info.Model).Trim())
+    $zapytanie = $info.Producent + ' ' + $info.Model + ' sterowniki BIOS'
+    if (-not $info.Laptop -and $info.Plyta) { $zapytanie = $info.PlytaProducent + ' ' + $info.Plyta + ' BIOS support' }
+    $w.Strona = 'https://www.google.com/search?q=' + [uri]::EscapeDataString($zapytanie)
+    switch ($producent) {
+        'Dell'   { $w.Uwagi = 'Dell: sterowniki i BIOS najpewniej zainstaluje Dell Command | Update - przycisk "Narzędzie producenta".'; $w.Strona = (Strona-Producenta).Adres }
+        'HP'     { $w.Uwagi = 'HP: sterowniki i BIOS zainstaluje HP Support Assistant - przycisk "Narzędzie producenta".' }
+        'ASRock' { $w.Uwagi = 'ASRock blokuje automatyczne pobieranie list plików - otwórz stronę producenta (BIOS: Instant Flash z pendrive).' }
+        default  { $w.Uwagi = 'Dla tego producenta program nie umie pobrać listy plików - otwórz stronę producenta.' }
+    }
+    $w
+}
+
+function Szukaj-UProducenta($info, [int]$wybrany) {
+    $producent = Wykryj-Producenta $info
+    switch ($producent) {
+        'MSI'      { return (Produkty-MSI $info) }
+        'Gigabyte' { return (Produkty-Gigabyte $info $wybrany) }
+        'ASUS'     { return (Produkty-ASUS $info) }
+        'Lenovo'   { return (Produkty-Lenovo $info) }
+    }
+    if (-not $producent) { $producent = $info.Producent }
+    Produkty-Inne $info $producent
+}
+
+# ---------- porownanie z tym, co jest zainstalowane ----------
+function Dopasuj-Sterownik($p, $zainstalowane) {
+    $tekst = ($p.Kategoria + ' ' + $p.Nazwa).ToUpper()
+    $rodzaje = @()
+    if ($tekst -match 'AUDIO|SOUND') { $rodzaje += 'Dźwięk' }
+    if ($tekst -match 'LAN|ETHERNET|NETWORK|WIRELESS|WLAN|WI-?FI') { $rodzaje += 'Sieć (Wi-Fi, LAN)' }
+    if ($tekst -match 'BLUETOOTH') { $rodzaje += 'Bluetooth' }
+    if ($tekst -match 'VGA|GRAPHIC|DISPLAY') { $rodzaje += 'Karta graficzna' }
+    if ($tekst -match 'CHIPSET|SERIAL IO|MANAGEMENT ENGINE') { $rodzaje += 'Chipset i system' }
+    if ($tekst -match 'SATA|RAID|STORAGE|NVME|RAPID STORAGE') { $rodzaje += 'Kontroler dysków' }
+    if ($rodzaje.Count -eq 0) { return $null }
+    $firmy = @(@('REALTEK', 'INTEL', 'AMD', 'MEDIATEK', 'QUALCOMM', 'KILLER', 'BROADCOM', 'NVIDIA', 'MARVELL', 'AQUANTIA', 'ASMEDIA') | Where-Object { $tekst -match $_ })
+    $wifi = ($tekst -match 'WIRELESS|WLAN|WI-?FI')
+    $lan = ($tekst -match '\bLAN\b|ETHERNET')
+    $pasujace = @()
+    foreach ($s in @($zainstalowane)) {
+        if ($null -eq $s -or $rodzaje -notcontains $s.Rodzaj -or -not $s.Wersja) { continue }
+        $opis = ([string]$s.Nazwa + ' ' + [string]$s.Producent).ToUpper()
+        $firma = ($firmy.Count -eq 0)
+        foreach ($f in $firmy) { if ($opis -match $f) { $firma = $true } }
+        if (-not $firma) { continue }
+        if ($s.Rodzaj -eq 'Sieć (Wi-Fi, LAN)') {
+            $toWifi = ($opis -match 'WI-?FI|WIRELESS|WLAN|802\.11')
+            if ($wifi -and -not $lan -and -not $toWifi) { continue }
+            if ($lan -and -not $wifi -and $toWifi) { continue }
+        }
+        $pasujace += $s
+    }
+    $wersje = @($pasujace | ForEach-Object { [string]$_.Wersja } | Select-Object -Unique)
+    if ($wersje.Count -ne 1) { return $null }
+    $pasujace[0]
+}
+
+function Oznacz-PlikiProducenta($wynik, $zainstalowane) {
+    foreach ($p in $wynik.Pliki) {
+        if ($p.Rodzaj -eq 'BIOS') {
+            $p.Zainstalowany = $wynik.Info.Bios
+            $p.Por = Porownaj-ZZainstalowana $p $wynik.BiosPor $wynik.Info.BiosData
+            continue
+        }
+        if ($p.Rodzaj -ne 'Sterownik') { continue }
+        $s = Dopasuj-Sterownik $p $zainstalowane
+        if (-not $s) { continue }
+        $p.Zainstalowany = [string]$s.Wersja
+        $va = $null; $vb = $null
+        try { $va = [version]$p.Wersja; $vb = [version]([string]$s.Wersja) } catch { }
+        if ($va -and $vb -and $va.Major -eq $vb.Major) { $p.Por = $va.CompareTo($vb) }
+    }
+}
+
+# ---------- pobieranie plikow ----------
+function Nazwa-PlikuZAdresu([string]$adres) {
+    $n = ''
+    try { $n = [IO.Path]::GetFileName(([uri]$adres).AbsolutePath) } catch { }
+    if (-not $n) { $n = 'plik_producenta.bin' }
+    ([uri]::UnescapeDataString($n) -replace '[\\/:*?"<>|]', '_')
+}
+
+function Czy-PlikBinarny([string]$plik) {
+    # serwer czasem zwraca strone HTML (blokada) zamiast pliku
+    try {
+        $fs = [IO.File]::OpenRead($plik)
+        try {
+            $bufor = New-Object byte[] 256
+            $n = $fs.Read($bufor, 0, 256)
+        } finally { $fs.Close() }
+        if ($n -lt 4) { return $false }
+        $t = [System.Text.Encoding]::ASCII.GetString($bufor, 0, $n).TrimStart()
+        return (-not ($t -match '^(?i)(<!DOCTYPE|<html|<head|<\?xml|\{)'))
+    } catch { return $false }
+}
+
+function Sprawdz-Sume([string]$plik, $p) {
+    # $true zgodna, $false niezgodna, $null producent nie podal sumy
+    try {
+        if ($p.Sha256) { return ((Get-FileHash -LiteralPath $plik -Algorithm SHA256).Hash -eq [string]$p.Sha256) }
+        if ($p.Md5) { return ((Get-FileHash -LiteralPath $plik -Algorithm MD5).Hash -eq [string]$p.Md5) }
+    } catch { }
+    $null
+}
+
+function Folder-Roboczy {
+    # bez spacji w sciezce (polecenia instalatorow Lenovo jej nie lubia)
+    $baza = Join-Path $env:windir 'Temp'
+    if (-not $czyAdmin -or -not (Test-Path -LiteralPath $baza)) { $baza = $env:TEMP }
+    $f = Join-Path $baza ('serwis_producent_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path $f | Out-Null
+    $f
+}
+
+function Folder-Pobranych {
+    $f = ''
+    if ($stan.Klient) { try { $f = (Foldery-Profilu $stan.Klient).Pobrane } catch { } }
+    if (-not $f) { $f = Join-Path $env:USERPROFILE 'Downloads' }
+    if (-not (Test-Path -LiteralPath $f)) { New-Item -ItemType Directory -Force -Path $f | Out-Null }
+    $f
+}
+
+function Pobierz-PrzezPrzegladarkeRecznie([string]$adres, [string]$nazwa) {
+    $foldery = @((Folder-Pobranych), (Join-Path $env:USERPROFILE 'Downloads')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+    $start = Get-Date
+    Log '  serwer producenta nie wpuścił programu - pobieram przez przeglądarkę (zapisz plik w Pobranych, program sam go wykryje, czekam do 10 min)...'
+    # explorer.exe otwiera adres w przegladarce zalogowanego uzytkownika (nie na koncie administratora)
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $adres + '"')
+    $wzor = [IO.Path]::GetFileNameWithoutExtension($nazwa) + '*' + [IO.Path]::GetExtension($nazwa)
+    $poprzedni = -1
+    while (((Get-Date) - $start).TotalMinutes -lt 10) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 700
+        foreach ($f in $foldery) {
+            $plik = Get-ChildItem -LiteralPath $f -Filter $wzor -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $start.AddSeconds(-10) -and $_.Length -gt 0 -and $_.Extension -notmatch 'crdownload|part|tmp' } |
+                Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
+            if ($plik -and -not (Test-Path -LiteralPath ($plik.FullName + '.part'))) {
+                if ($plik.Length -eq $poprzedni) { return $plik.FullName }
+                $poprzedni = $plik.Length
+            }
+        }
+    }
+    $null
+}
+
+function Pobierz-PlikProducenta($p, [string]$folder) {
+    $cel = Join-Path $folder (Nazwa-PlikuZAdresu $p.Adres)
+    Log ('  pobieram: ' + $p.Nazwa + ' ' + $p.Wersja + ' (' + (Tekst-Rozmiaru $p.Bajty) + ')...')
+    $ok = (Pobierz-Plik $p.Adres $cel '' ('pobieranie ' + $p.Wersja)) -and (Czy-PlikBinarny $cel)
+    if (-not $ok) {
+        Remove-Item -LiteralPath $cel -Force -ErrorAction SilentlyContinue
+        $cel = Pobierz-PrzezPrzegladarkeRecznie $p.Adres (Split-Path -Leaf $cel)
+        if (-not $cel) { throw 'nie udało się pobrać pliku od producenta' }
+    }
+    $suma = Sprawdz-Sume $cel $p
+    if ($suma -eq $false) {
+        Remove-Item -LiteralPath $cel -Force -ErrorAction SilentlyContinue
+        throw 'suma kontrolna pobranego pliku nie zgadza się z podaną przez producenta - plik usunięto'
+    }
+    if ($suma -eq $true) { Log '  suma kontrolna zgodna z podaną przez producenta.' }
+    $cel
+}
+
+function Zapisz-WPobranych([string]$sciezka) {
+    $cel = Join-Path (Folder-Pobranych) (Split-Path -Leaf $sciezka)
+    Copy-Item -LiteralPath $sciezka -Destination $cel -Recurse -Force
+    $cel
+}
+
+# ---------- 7-Zip i rozpakowywanie ----------
+function Sciezka-7Zip {
+    foreach ($baza in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+        if (-not $baza) { continue }
+        $p = Join-Path $baza '7-Zip\7z.exe'
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    $r = [string](Czytaj-Rejestr 'HKLM:\SOFTWARE\7-Zip' 'Path')
+    if ($r -and (Test-Path -LiteralPath (Join-Path $r '7z.exe'))) { return (Join-Path $r '7z.exe') }
+    $null
+}
+
+function Zapewnij-7Zip {
+    $p = Sciezka-7Zip
+    if ($p) { return $p }
+    if (-not $stan.Winget) { $stan.Winget = Sciezka-Winget }
+    if (-not $stan.Winget -or -not $czyAdmin) { return $null }
+    Log '  do rozpakowania potrzebny jest 7-Zip - instaluję (darmowy, z oficjalnego repozytorium winget)...'
+    $w = Zainstaluj-Program $stan.Winget ([pscustomobject]@{ Id = '7zip.7zip'; Etykieta = '7-Zip' })
+    Log ('  7-Zip: ' + $w)
+    if ($w -eq 'OK') { Zapisz-Prace 'Instalacja' 'Zainstalowano: 7-Zip' }
+    Sciezka-7Zip
+}
+
+function Czy-Archiwum([string]$plik) {
+    @('.zip', '.7z', '.rar', '.cab', '.tar', '.gz') -contains [IO.Path]::GetExtension($plik).ToLower()
+}
+
+function Rozpakuj-Archiwum([string]$plik, [string]$cel) {
+    New-Item -ItemType Directory -Force -Path $cel | Out-Null
+    $roz = [IO.Path]::GetExtension($plik).ToLower()
+    if ($roz -eq '.zip') {
+        try {
+            Expand-Archive -LiteralPath $plik -DestinationPath $cel -Force -ErrorAction Stop
+            return $true
+        } catch { Log '  wbudowane rozpakowywanie nie dało rady - próbuję 7-Zip.' }
+    }
+    if ($roz -eq '.cab') {
+        $kod = Uruchom-Exe (Join-Path $env:windir 'System32\expand.exe') ('-F:* "' + $plik + '" "' + $cel + '"') 'rozpakowywanie'
+        if ($kod -eq 0) { return $true }
+    }
+    $z = Zapewnij-7Zip
+    if (-not $z) { Log '  brak 7-Zip - nie mogę rozpakować tego archiwum.'; return $false }
+    $kod = Uruchom-Exe $z ('x -y -o"' + $cel + '" "' + $plik + '"') 'rozpakowywanie (7-Zip)'
+    ($kod -eq 0 -or $kod -eq 1)
+}
+
+function Glebokosc([string]$baza, [string]$sciezka) { @($sciezka.Substring($baza.Length).Trim('\') -split '\\').Count }
+
+function Znajdz-Instalator([string]$folder) {
+    $pliki = @(Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { @('.exe', '.msi') -contains $_.Extension.ToLower() -and $_.BaseName -notmatch $wykluczoneInstalatory })
+    if ($pliki.Count -eq 0) { return $null }
+    $najlepszy = $null; $ocena = 999
+    foreach ($p in $pliki) {
+        $g = Glebokosc $folder $p.FullName
+        $o = $g * 10
+        if ($p.BaseName -match '(?i)^(setup|install|installer|asussetup|autorun)$') { $o = $o - 5 }
+        elseif ($p.BaseName -match '(?i)setup|install') { $o = $o - 3 }
+        if ($o -lt $ocena) { $ocena = $o; $najlepszy = $p }
+    }
+    if ($pliki.Count -gt 1 -and $najlepszy.BaseName -notmatch '(?i)setup|install|autorun' -and (Glebokosc $folder $najlepszy.FullName) -gt 2) { return $null }
+    $najlepszy
+}
+
+function Pliki-Inf([string]$folder) {
+    $infy = @(Get-ChildItem -LiteralPath $folder -Recurse -Filter '*.inf' -File -ErrorAction SilentlyContinue)
+    # inne architektury pomijamy
+    $dobre = @($infy | Where-Object { $_.FullName -notmatch '(?i)[\\/](x86|x32|win32|i386|arm64|arm|32bit|winxp|win7|win8)[\\/]' })
+    if ($dobre.Count -gt 0) { return $dobre }
+    $infy
+}
+
+# ---------- instalacja ----------
+function Wynik-Instalacji([bool]$ok, [bool]$restart, [string]$opis) {
+    [pscustomobject]@{ Ok = $ok; Restart = $restart; Opis = $opis }
+}
+
+function Uruchom-Interaktywnie([string]$plik, [string]$argumenty) {
+    $stan.Interaktywny = $true
+    Log ('  uruchamiam instalator producenta: ' + (Split-Path -Leaf $plik) + ' - dokończ instalację w jego oknie.')
+    $start = Get-Date; $ostatni = Get-Date
+    if ($plik -like '*.msi') {
+        $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList ('/i "' + $plik + '"') -PassThru
+    } elseif ($argumenty) {
+        $proc = Start-Process -FilePath $plik -ArgumentList $argumenty -WorkingDirectory (Split-Path -Parent $plik) -PassThru
+    } else {
+        $proc = Start-Process -FilePath $plik -WorkingDirectory (Split-Path -Parent $plik) -PassThru
+    }
+    $null = $proc.Handle
+    while (-not $proc.HasExited) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 250
+        if (((Get-Date) - $ostatni).TotalSeconds -ge 120) {
+            $ostatni = Get-Date
+            Log ('  instalator nadal pracuje (' + [int]((Get-Date) - $start).TotalMinutes + ' min) - sprawdź jego okno.')
+        }
+    }
+    $proc.WaitForExit()
+    $kod = $proc.ExitCode
+    if ($kod -eq 0) { return (Wynik-Instalacji $true $false 'zainstalowano (instalator producenta)') }
+    if ($kod -eq 3010 -or $kod -eq 1641) { return (Wynik-Instalacji $true $true 'zainstalowano - wymaga ponownego uruchomienia') }
+    Wynik-Instalacji $false $false ('instalator zakończył się kodem ' + $kod + ' (część instalatorów tak robi mimo powodzenia - sprawdź w Menedżerze urządzeń)')
+}
+
+function Dodaj-SterownikiInf($infy) {
+    $ok = 0; $bez = 0; $bledy = 0; $restart = $false
+    foreach ($i in @($infy)) {
+        $w = Uruchom-Program ('pnputil.exe /add-driver "' + $i.FullName + '" /install') ('sterownik ' + $i.Name)
+        if ($w.Kod -eq 0) { $ok++ }
+        elseif ($w.Kod -eq 3010) { $ok++; $restart = $true }
+        elseif ($w.Kod -eq 259) { $bez++ }
+        else { $bledy++ }
+    }
+    $opis = 'dodano sterowniki (pnputil): ' + ($ok + $bez) + ' z ' + @($infy).Count
+    if ($bledy -gt 0) { $opis = $opis + ' (pozostałe nie pasują do tego sprzętu albo systemu)' }
+    if ($ok -eq 0 -and $bez -gt 0) { $opis = 'dodano do magazynu sterowników - Windows uznał obecny za równie dobry albo urządzenie nie pasuje' }
+    Wynik-Instalacji (($ok + $bez) -gt 0) $restart $opis
+}
+
+function Zainstaluj-PakietLenovo($p, [string]$plik, [string]$folder) {
+    $l = $p.Lenovo
+    # BIOS i pakiety, ktore same restartuja komputer: zawsze z oknem instalatora
+    if ($p.Rodzaj -eq 'BIOS' -or -not $l -or -not $l.Typ -or @(1, 4, 5) -contains [int]$l.Restart) { return (Uruchom-Interaktywnie $plik '') }
+    $pakiet = Join-Path $folder ('pakiet_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force -Path $pakiet | Out-Null
+    if ($l.Rozpakuj) {
+        $polecenie = $l.Rozpakuj.Replace('%PACKAGEPATH%', $pakiet)
+        [void](Uruchom-Program ('cd /d "' + (Split-Path -Parent $plik) + '" && ' + $polecenie) 'rozpakowywanie pakietu Lenovo')
+    } else {
+        Copy-Item -LiteralPath $plik -Destination $pakiet -Force
+    }
+    if ($l.Typ -eq 'inf') {
+        $infy = @(Pliki-Inf $pakiet)
+        if ($infy.Count -eq 0) { return (Uruchom-Interaktywnie $plik '') }
+        return (Dodaj-SterownikiInf $infy)
+    }
+    if ($l.Typ -eq 'cmd' -and $l.Polecenie) {
+        $polecenie = $l.Polecenie.Replace('%PACKAGEPATH%', $pakiet)
+        $w = Uruchom-Program ('cd /d "' + $pakiet + '" && ' + $polecenie) ('instalacja: ' + $p.Nazwa)
+        $kody = @(($l.Kody -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($kody.Count -eq 0) { $kody = @('0') }
+        if ($kody -contains [string]$w.Kod) {
+            return (Wynik-Instalacji $true ($w.Kod -eq 3010 -or [int]$l.Restart -eq 3) 'zainstalowano (pakiet Lenovo, po cichu)')
+        }
+        return (Wynik-Instalacji $false $false ('pakiet Lenovo zwrócił kod ' + $w.Kod))
+    }
+    Uruchom-Interaktywnie $plik ''
+}
+
+function Lista-Pendrive {
+    $lista = New-Object System.Collections.ArrayList
+    try {
+        foreach ($d in @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=2' -ErrorAction Stop)) {
+            if ([long]$d.Size -le 0) { continue }
+            [void]$lista.Add([pscustomobject]@{ Litera = [string]$d.DeviceID; System = [string]$d.FileSystem
+                Opis = ([string]$d.DeviceID + '  ' + [string]$d.VolumeName + '  (' + [string]$d.FileSystem + ', ' + (Tekst-Rozmiaru ([long]$d.Size)) + ')') })
+        }
+    } catch { }
+    try {
+        # dyski USB widziane jako stale (np. szybkie pendrive)
+        foreach ($dysk in @(Get-Disk -ErrorAction Stop | Where-Object { [string]$_.BusType -eq 'USB' })) {
+            foreach ($cz in @(Get-Partition -DiskNumber $dysk.Number -ErrorAction SilentlyContinue)) {
+                $l = [string]$cz.DriveLetter
+                if ($l -notmatch '^[A-Za-z]$') { continue }
+                $litera = $l.ToUpper() + ':'
+                if (@($lista | Where-Object { $_.Litera -eq $litera }).Count) { continue }
+                $d = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='" + $litera + "'") -ErrorAction SilentlyContinue
+                if (-not $d) { continue }
+                [void]$lista.Add([pscustomobject]@{ Litera = $litera; System = [string]$d.FileSystem
+                    Opis = ($litera + '  ' + [string]$d.VolumeName + '  (' + [string]$d.FileSystem + ', ' + (Tekst-Rozmiaru ([long]$d.Size)) + ', USB)') })
+            }
+        }
+    } catch { }
+    $lista
+}
+
+function Wybierz-Pendrive {
+    while ($true) {
+        $lista = @(Lista-Pendrive)
+        if ($lista.Count -eq 1) {
+            $t = 'Skopiować pliki BIOS-u na pendrive ' + $lista[0].Opis + '?' + $NL + 'Nic nie zostanie skasowane - pliki zostaną dopisane.'
+            if ($lista[0].System -ne 'FAT32') { $t = $t + $NL + $NL + 'Uwaga: system plików ' + $lista[0].System + ' - narzędzia BIOS-u najpewniej czytają FAT32.' }
+            if (Pytanie $t) { return $lista[0] }
+            return $null
+        }
+        if ($lista.Count -gt 1) {
+            $i = Wybierz-ZListy 'Pendrive na BIOS' 'Wybierz pendrive, na który skopiować BIOS (najlepiej FAT32). Nic nie zostanie skasowane.' ([string[]]@($lista | ForEach-Object { $_.Opis })) 0
+            if ($i -ge 0) { return $lista[$i] }
+            return $null
+        }
+        if (-not (Pytanie ('Nie widzę pendrive.' + $NL + 'Podłącz pendrive (najlepiej FAT32) i kliknij Tak.' + $NL + 'Nie = zapisz BIOS tylko w folderze Pobrane.'))) { return $null }
+    }
+}
+
+function Instrukcja-Bios([string]$producent, [string]$plik) {
+    switch ($producent) {
+        'MSI'      { return ('Uruchom ponownie komputer i wciśnij Delete, żeby wejść do BIOS-u. Wybierz M-FLASH (komputer uruchomi się w trybie aktualizacji), wskaż pendrive i plik ' + $plik + '.') }
+        'Gigabyte' { return ('Uruchom ponownie komputer i wciśnij Delete (albo End). Wybierz Q-Flash (F8) > Update BIOS, wskaż pendrive i plik ' + $plik + '.') }
+        'ASUS'     { return ('Uruchom ponownie komputer i wciśnij Delete albo F2. Wybierz Tool > ASUS EZ Flash 3 Utility, wskaż pendrive i plik ' + $plik + '.') }
+        'ASRock'   { return ('Uruchom ponownie komputer, wciśnij F6 (Instant Flash) i wybierz plik ' + $plik + '.') }
+    }
+    'Wejdź do BIOS-u, uruchom wbudowane narzędzie aktualizacji i wskaż plik ' + $plik + '.'
+}
+
+function Przygotuj-Bios($p, [string]$plik, [string]$rozpakowane, $wynik) {
+    $obraz = $null; $instalator = $null
+    if ($rozpakowane) {
+        $pliki = @(Get-ChildItem -LiteralPath $rozpakowane -Recurse -File -ErrorAction SilentlyContinue)
+        $obraz = $pliki | Where-Object { $_.Extension -notmatch '(?i)^\.(exe|txt|pdf|bat|nsh|efi|ini|doc|docx|htm|html|url|msi|dll|cmd)$' } |
+            Sort-Object -Property Length -Descending | Select-Object -First 1
+        $instalator = Znajdz-Instalator $rozpakowane
+    } elseif ($plik -match '(?i)\.exe$') { $instalator = Get-Item -LiteralPath $plik }
+    if ($instalator -and ($wynik.Info.Laptop -or -not $obraz)) {
+        $t = 'Producent dołączył program do aktualizacji BIOS-u z poziomu Windows: ' + $instalator.Name + '.' + $NL + 'Uruchomić go teraz?' + $NL + $NL +
+            'Podłącz zasilacz, zamknij programy i nie wyłączaj komputera w trakcie.'
+        if ($obraz) { $t = $t + $NL + 'Nie = przygotuj pendrive.' }
+        if (Pytanie $t) { return (Uruchom-Interaktywnie $instalator.FullName '') }
+        if (-not $obraz) { return (Wynik-Instalacji $false $false 'anulowano') }
+    }
+    if (-not $obraz) {
+        $cel = Zapisz-WPobranych $plik
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $cel + '"')
+        return (Wynik-Instalacji $true $false ('zapisano w Pobranych: ' + (Split-Path -Leaf $cel)))
+    }
+    $folderObrazu = $obraz.DirectoryName
+    $instrukcja = Instrukcja-Bios $wynik.Producent $obraz.Name
+    $pendrive = Wybierz-Pendrive
+    if (-not $pendrive) {
+        $cel = Zapisz-WPobranych $folderObrazu
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $cel + '"')
+        Info ('BIOS ' + $p.Wersja + ' zapisano w folderze:' + $NL + $cel + $NL + $NL + 'Skopiuj zawartość na pendrive (FAT32). ' + $instrukcja)
+        return (Wynik-Instalacji $true $false ('BIOS zapisany w Pobranych (' + (Split-Path -Leaf $cel) + ')'))
+    }
+    Log ('  kopiuję BIOS na ' + $pendrive.Litera + '...')
+    Copy-Item -Path (Join-Path $folderObrazu '*') -Destination ($pendrive.Litera + '\') -Recurse -Force
+    if (-not (Test-Path -LiteralPath (Join-Path ($pendrive.Litera + '\') $obraz.Name))) { throw 'nie udało się skopiować pliku BIOS-u na pendrive' }
+    $t = 'BIOS ' + $p.Wersja + ' jest na pendrive ' + $pendrive.Litera + ' (plik ' + $obraz.Name + ').' + $NL + $NL + $instrukcja + $NL + $NL +
+        'Nie wyłączaj komputera do końca aktualizacji. Po aktualizacji ustawienia BIOS-u (np. XMP/EXPO, kolejność uruchamiania) mogą wrócić do domyślnych.' + $NL + $NL +
+        'Uruchomić teraz komputer ponownie prosto do BIOS-u?'
+    if (Pytanie $t) {
+        Zapisz-Prace 'Sterowniki' ('BIOS ' + $p.Wersja + ' przygotowany na pendrive, aktualizacja z BIOS-u')
+        $w = Uruchom-Program 'shutdown.exe /r /fw /t 20' 'restart do BIOS-u'
+        if ($w.Kod -ne 0) { Info 'Ten komputer nie pozwala uruchomić się prosto do BIOS-u - uruchom go ponownie i wciśnij klawisz wejścia do BIOS-u.' }
+        else { Log 'Komputer uruchomi się ponownie do BIOS-u za 20 sekund (anulowanie: shutdown /a).' }
+    }
+    Wynik-Instalacji $true $false ('BIOS na pendrive ' + $pendrive.Litera + ' - dokończ w BIOS-ie')
+}
+
+function Zainstaluj-PlikProducenta($p, [string]$plik, [string]$folder, $wynik) {
+    if ($p.Lenovo) { return (Zainstaluj-PakietLenovo $p $plik $folder) }
+    $rozpakowane = $null
+    if (Czy-Archiwum $plik) {
+        $rozpakowane = Join-Path $folder ('pliki_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        if (-not (Rozpakuj-Archiwum $plik $rozpakowane)) { return (Wynik-Instalacji $false $false 'nie udało się rozpakować archiwum') }
+    }
+    if ($p.Rodzaj -eq 'BIOS') { return (Przygotuj-Bios $p $plik $rozpakowane $wynik) }
+    if (-not $rozpakowane) {
+        if ($plik -match '(?i)\.(exe|msi)$') { return (Uruchom-Interaktywnie $plik '') }
+        $cel = Zapisz-WPobranych $plik
+        return (Wynik-Instalacji $false $false ('nieznany typ pliku - zapisano w Pobranych: ' + (Split-Path -Leaf $cel)))
+    }
+    $instalator = Znajdz-Instalator $rozpakowane
+    if ($p.Rodzaj -eq 'Sterownik') {
+        $infy = @(Pliki-Inf $rozpakowane)
+        if ($infy.Count -gt 0 -and $infy.Count -le 60) {
+            Log ('  instaluję sterownik po cichu (pnputil, plików .inf: ' + $infy.Count + ')...')
+            $w = Dodaj-SterownikiInf $infy
+            if ($w.Ok -or -not $instalator) { return $w }
+            Log '  pnputil nie dał rady - uruchamiam instalator producenta.'
+        }
+    }
+    if ($instalator) { return (Uruchom-Interaktywnie $instalator.FullName '') }
+    $cel = Zapisz-WPobranych $rozpakowane
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $cel + '"')
+    Wynik-Instalacji $false $false ('brak instalatora w paczce - rozpakowano do Pobranych (' + (Split-Path -Leaf $cel) + ')')
+}
+
+# ---------- okienko wyboru z listy ----------
+function Wybierz-ZListy([string]$tytul, [string]$tekst, [string[]]$pozycje, [int]$domyslna) {
+    $o = New-Object System.Windows.Forms.Form
+    $o.Text = $tytul
+    $o.Size = New-Object System.Drawing.Size((Px 560), (Px 420))
+    $o.StartPosition = 'CenterParent'
+    $o.MinimizeBox = $false
+    $o.MaximizeBox = $false
+    $o.ShowInTaskbar = $false
+    $o.Icon = $form.Icon
+    $o.Font = $czcionka
+    $o.BackColor = [System.Drawing.Color]::White
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $tekst
+    $l.Dock = 'Top'
+    $l.Height = Px 64
+    $l.Padding = New-Object System.Windows.Forms.Padding((Px 12), (Px 10), (Px 12), (Px 4))
+    $l.ForeColor = $kolorTekst
+    $lista = New-Object System.Windows.Forms.ListBox
+    $lista.Dock = 'Fill'
+    $lista.IntegralHeight = $false
+    $lista.BorderStyle = 'FixedSingle'
+    foreach ($p in $pozycje) { [void]$lista.Items.Add($p) }
+    if ($domyslna -ge 0 -and $domyslna -lt $lista.Items.Count) { $lista.SelectedIndex = $domyslna }
+    $panel = Nowy-PanelPrzyciskow
+    $bOk = Nowy-Przycisk $panel 'Wybierz' $true
+    $bAnuluj = Nowy-Przycisk $panel 'Anuluj' $false
+    $bOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $bAnuluj.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $o.AcceptButton = $bOk
+    $o.CancelButton = $bAnuluj
+    $lista.Add_DoubleClick({ if ($this.SelectedIndex -ge 0) { $this.FindForm().DialogResult = [System.Windows.Forms.DialogResult]::OK } })
+    $o.Controls.Add($lista)
+    $o.Controls.Add($l)
+    $o.Controls.Add($panel)
+    $wlasciciel = [System.Windows.Forms.Form]::ActiveForm
+    if (-not $wlasciciel) { $wlasciciel = $form }
+    $r = $o.ShowDialog($wlasciciel)
+    $idx = $lista.SelectedIndex
+    $o.Dispose()
+    if ($r -eq [System.Windows.Forms.DialogResult]::OK) { return $idx }
+    -1
+}
+
+# =====================================================================
 #  OKNO
 # =====================================================================
 $infoOS = ''
@@ -2917,12 +3962,13 @@ $cmbPakietI = Nowa-Lista $panelI 260 ([string[]]$pakietyProgramow.Keys)
 $btnPakietI = Nowy-Przycisk $panelI 'Zaznacz pakiet' $false
 $panelI.SetFlowBreak($btnPakietI, $true)
 $btnIInstaluj  = Nowy-Przycisk $panelI 'Zainstaluj zaznaczone' $true
+$btnIWersja    = Nowy-Przycisk $panelI 'Wybierz wersję...' $false
 $btnIAktualizuj = Nowy-Przycisk $panelI 'Zaktualizuj wszystkie programy' $false
 $btnIOdznacz   = Nowy-Przycisk $panelI 'Odznacz wszystko' $false
 $btnIOdswiez   = Nowy-Przycisk $panelI 'Odśwież' $false
 
 $tabInstalacja = Nowa-Zakladka 'Instalacja programów' $siatkaI ('Instalacja przez winget - oficjalne repozytorium Microsoft: najnowsze wersje z oficjalnych źródeł, bez dodatków i pasków. ' +
-    'Nic nie jest pobierane, dopóki nie klikniesz "Zainstaluj zaznaczone" albo "Zaktualizuj wszystkie programy".') $panelI
+    '"Wybierz wersję" (albo dwuklik) pozwala zainstalować konkretną, także starszą wersję. Nic nie jest pobierane bez kliknięcia.') $panelI
 
 # ---------- Sprzet ----------
 $siatkaS = Nowa-Siatka
@@ -2955,6 +4001,7 @@ $panelD = Nowy-PanelPrzyciskow
 $btnDSzukaj     = Nowy-Przycisk $panelD 'Sprawdź aktualizacje' $true
 $btnDInstaluj   = Nowy-Przycisk $panelD 'Zainstaluj zaznaczone' $false
 $btnDWersja     = Nowy-Przycisk $panelD 'Wybierz wersję...' $false
+$btnDPlikiProducenta = Nowy-Przycisk $panelD 'Szukaj u producenta (BIOS i sterowniki)' $false
 $btnDWazne      = Nowy-Przycisk $panelD 'Zaznacz ważne' $false
 $btnDWszystkie  = Nowy-Przycisk $panelD 'Zaznacz wszystkie dostępne' $false
 $btnDOdznacz    = Nowy-Przycisk $panelD 'Odznacz wszystko' $false
@@ -2962,8 +4009,8 @@ $btnDProducent  = Nowy-Przycisk $panelD 'Narzędzie producenta (BIOS)' $false
 $btnDStrona     = Nowy-Przycisk $panelD 'Strona producenta' $false
 $btnDUrzadzenia = Nowy-Przycisk $panelD 'Menedżer urządzeń' $false
 
-$tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update o nowsze sterowniki i firmware (u wielu producentów także BIOS). ' +
-    '"Wybierz wersję" (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft - także starsze. BIOS: "Narzędzie producenta" (Dell, Lenovo, HP, Intel).') $panelD
+$tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update. "Szukaj u producenta" pobiera listę BIOS-ów i sterowników prosto ze strony producenta ' +
+    '(MSI, Gigabyte, ASUS, Lenovo) i sam je instaluje. "Wybierz wersję" (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft - także starsze.') $panelD
 
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
@@ -3816,6 +4863,7 @@ function Wypelnij-Instalacje {
     foreach ($p in $listaProgramow) {
         $jest = ($zainstalowane -contains $p.Id)
         if (-not $stan.Winget) { $stanTxt = 'brak winget' } elseif ($jest) { $stanTxt = 'zainstalowany' } else { $stanTxt = '' }
+        if ($jest -and $stan.WersjeWinget -and $stan.WersjeWinget.ContainsKey($p.Id)) { $stanTxt = 'zainstalowany ' + $stan.WersjeWinget[$p.Id] }
         $idx = $siatkaI.Rows.Add($false, $p.Etykieta, $p.Kategoria, $p.Opis, $stanTxt)
         $wiersz = $siatkaI.Rows[$idx]
         $wiersz.Tag = $p
@@ -3831,7 +4879,7 @@ $btnPakietI.Add_Click({
     $ids = @($pakietyProgramow[$nazwa])
     $licznik = 0
     foreach ($r in $siatkaI.Rows) {
-        if (($ids -contains $r.Tag.Id) -and ([string]$r.Cells[4].Value -ne 'zainstalowany')) {
+        if (($ids -contains $r.Tag.Id) -and ([string]$r.Cells[4].Value -notlike 'zainstalowany*')) {
             $r.Cells[0].Value = $true
             $licznik++
         }
@@ -3898,6 +4946,73 @@ $btnIAktualizuj.Add_Click({
     }
 })
 
+function Wybierz-WersjeProgramu {
+    $r = $siatkaI.CurrentRow
+    if (-not $r -or -not $r.Tag) { Info 'Kliknij program na liście, a potem "Wybierz wersję...".'; return }
+    if (-not $stan.Winget) { $stan.Winget = Sciezka-Winget }
+    if (-not $stan.Winget) { Brak-Winget; return }
+    $p = $r.Tag
+    $wersje = @()
+    Zajety $true
+    try {
+        Log ('Pobieram listę wersji: ' + $p.Etykieta + '...')
+        $wersje = @(Wersje-Winget $stan.Winget $p.Id)
+    } finally { Zajety $false }
+    if ($wersje.Count -eq 0) { Info ('Nie udało się pobrać listy wersji programu ' + $p.Etykieta + ' (brak internetu albo repozytorium nie podaje wersji).'); return }
+    $zainst = ''
+    if ($stan.WersjeWinget -and $stan.WersjeWinget.ContainsKey($p.Id)) { $zainst = [string]$stan.WersjeWinget[$p.Id] }
+    $opisy = @(for ($i = 0; $i -lt $wersje.Count; $i++) {
+        $t = [string]$wersje[$i]
+        if ($i -eq 0) { $t = $t + '   (najnowsza)' }
+        if ($zainst -and [string]$wersje[$i] -eq $zainst) { $t = $t + '   (zainstalowana)' }
+        $t
+    })
+    $tekstZ = 'brak'
+    if ($zainst) { $tekstZ = $zainst }
+    $idx = Wybierz-ZListy ('Wersja: ' + $p.Etykieta) ('Wersje programu ' + $p.Etykieta + ' w oficjalnym repozytorium winget (od najnowszej). Zainstalowana: ' + $tekstZ + '.') ([string[]]$opisy) 0
+    if ($idx -lt 0) { return }
+    if (-not (Wymaga-Admina)) { return }
+    $wersja = [string]$wersje[$idx]
+    $odinstaluj = $false
+    $por = $null
+    if ($zainst) { $por = Porownaj-Wersje $wersja $zainst }
+    if ($por -eq -1) {
+        $o = [System.Windows.Forms.MessageBox]::Show(('Wersja ' + $wersja + ' jest starsza od zainstalowanej (' + $zainst + ').' + $NL + $NL +
+            'Tak = najpierw odinstaluj obecną wersję (pewniejsze)' + $NL + 'Nie = instaluj na obecną' + $NL + 'Anuluj = nic nie rób'), 'Potwierdź', 'YesNoCancel', 'Question')
+        if ([string]$o -eq 'Cancel') { return }
+        $odinstaluj = ([string]$o -eq 'Yes')
+    } elseif ($por -eq 0) {
+        if (-not (Pytanie ('Wersja ' + $wersja + ' jest już zainstalowana. Zainstalować ją ponownie?'))) { return }
+    } elseif (-not (Pytanie ('Zainstalować ' + $p.Etykieta + ' w wersji ' + $wersja + '?'))) { return }
+    Zajety $true
+    try {
+        $r.Cells[4].Value = 'instaluję ' + $wersja + '...'
+        $r.Cells[4].Style.ForeColor = Kolor 'INFO'
+        if ($odinstaluj) {
+            Log ('Odinstalowuję obecną wersję: ' + $p.Etykieta + ' ' + $zainst)
+            $u = Uruchom-Program ('"' + $stan.Winget + '" uninstall --id "' + $p.Id + '" -e --silent --force --accept-source-agreements') ('odinstalowanie ' + $p.Etykieta)
+            Log ('  ' + (Opis-KoduWinget $u.Kod $u.Tekst))
+        }
+        Log ('Instaluję: ' + $p.Etykieta + ' ' + $wersja)
+        $wynik = Zainstaluj-WersjeProgramu $stan.Winget $p $wersja
+        Log ('  ' + $p.Etykieta + ' ' + $wersja + ': ' + $wynik)
+        if ($wynik -eq 'OK' -or $wynik -eq 'już zainstalowany') {
+            $r.Cells[4].Value = 'zainstalowany ' + $wersja
+            $r.Cells[4].Style.ForeColor = Kolor 'OK'
+            if (-not $stan.WersjeWinget) { $stan.WersjeWinget = @{} }
+            $stan.WersjeWinget[$p.Id] = $wersja
+            Zapisz-Prace 'Instalacja' ('Zainstalowano: ' + $p.Etykieta + ' (wersja ' + $wersja + ')')
+        } else {
+            $r.Cells[4].Value = $wynik
+            $r.Cells[4].Style.ForeColor = Kolor 'ŹLE'
+        }
+    } finally {
+        Zajety $false
+    }
+}
+
+$btnIWersja.Add_Click({ Wybierz-WersjeProgramu })
+$siatkaI.Add_CellDoubleClick({ param($nadawca, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -gt 0) { Wybierz-WersjeProgramu } })
 $btnIOdznacz.Add_Click({ Odznacz-Wszystko $siatkaI })
 $btnIOdswiez.Add_Click({
     Zajety $true
@@ -4130,7 +5245,7 @@ function Pokaz-AktualizacjeSterownikow($lista) {
             $stary = $false
             if ($s.Data) { try { $stary = (($teraz - [datetime]$s.Data).TotalDays -gt 3 * 365) } catch { } }
             if ($s.Waznosc -eq 'BIOS i firmware' -or $stary) {
-                $r.Cells[5].Value = 'brak w Windows Update - sprawdź narzędziem producenta'
+                $r.Cells[5].Value = 'brak w Windows Update - kliknij "Szukaj u producenta"'
                 $r.Cells[5].Style.ForeColor = Kolor 'INFO'
             } else {
                 $r.Cells[5].Value = 'aktualny według Windows Update'
@@ -4157,7 +5272,7 @@ $btnDSzukaj.Add_Click({
         $wazne = @($lista | Where-Object { (Rodzaj-Sterownika $_.Klasa)[1] -eq 'Ważne' }).Count
         $firmware = @($lista | Where-Object { ([string]$_.Klasa).ToUpper() -eq 'FIRMWARE' }).Count
         Log ('Dostępne aktualizacje: ' + $lista.Count + ' (ważne: ' + $wazne + ', BIOS i firmware: ' + $firmware + ').')
-        if ($lista.Count -eq 0) { Log 'Windows Update nie ma nowszych sterowników. BIOS sprawdzisz przyciskiem "Narzędzie producenta".' }
+        if ($lista.Count -eq 0) { Log 'Windows Update nie ma nowszych sterowników. BIOS i sterowniki ze strony producenta: "Szukaj u producenta".' }
     } finally {
         Zajety $false
     }
@@ -4420,12 +5535,312 @@ function Pokaz-WersjeSterownika($s) {
 function Wybierz-WersjeZaznaczonego {
     $w = $siatkaD.CurrentRow
     if (-not $w -or -not $w.Tag) { Info 'Kliknij sterownik na liście, a potem "Wybierz wersję...".'; return }
-    if (-not $w.Tag.Sprzet) { Info 'Wersji BIOS-u nie ma w katalogu Microsoft - użyj przycisku "Narzędzie producenta (BIOS)".'; return }
+    if (-not $w.Tag.Sprzet) { Pokaz-PlikiProducenta; return }
     Pokaz-WersjeSterownika $w.Tag
 }
 
 $btnDWersja.Add_Click({ Wybierz-WersjeZaznaczonego })
 $siatkaD.Add_CellDoubleClick({ param($nadawca, $e) if ($e.RowIndex -ge 0 -and $e.ColumnIndex -gt 0) { Wybierz-WersjeZaznaczonego } })
+
+# =====================================================================
+#  OKNO: BIOS I STEROWNIKI OD PRODUCENTA
+# =====================================================================
+function Tekst-StanuPliku($p) {
+    if ($null -eq $p.Por) { return '' }
+    $bios = ($p.Rodzaj -eq 'BIOS')
+    if ([int]$p.Por -gt 0) { if ($bios) { return 'NOWSZY' } else { return 'nowsza' } }
+    if ([int]$p.Por -eq 0) { if ($bios) { return 'zainstalowany' } else { return 'zainstalowana' } }
+    if ($bios) { 'starszy' } else { 'starsza' }
+}
+
+function Ustaw-StanWiersza($wiersz, [string]$tekst, [string]$kolor) {
+    $wiersz.Cells[7].Value = $tekst
+    $wiersz.Cells[7].Style.ForeColor = Kolor $kolor
+    $wiersz.Cells[7].Style.Font = $czcionkaGruba
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Dodaj-WierszProducenta($g, $p) {
+    $data = ''
+    if ($p.Data) { $data = ([datetime]$p.Data).ToString('yyyy-MM-dd') }
+    $rodzaj = $p.Rodzaj
+    if ($p.Kategoria -and $p.Kategoria -ne $p.Rodzaj) { $rodzaj = $rodzaj + $NL + $p.Kategoria }
+    $nazwa = [string]$p.Nazwa
+    if ($p.Beta) { $nazwa = $nazwa + '   (wersja testowa - beta)' }
+    $opis = [string]$p.Opis
+    if ($opis.Length -gt 260) { $opis = $opis.Substring(0, 257) + '...' }
+    if ($opis) { $nazwa = $nazwa + $NL + $opis }
+    $idx = $g.Rows.Add($false, $rodzaj, $nazwa, $p.Wersja, $data, (Tekst-Rozmiaru ([long]$p.Bajty)), $p.Zainstalowany, (Tekst-StanuPliku $p))
+    $w = $g.Rows[$idx]
+    $w.Tag = $p
+    $w.Cells[1].Style.Font = $czcionkaGruba
+    $w.Cells[3].Style.Font = $czcionkaGruba
+    $w.Cells[6].Style.ForeColor = $kolorSzary
+    if ($p.Beta) { $w.Cells[3].Style.ForeColor = $kolorSzary }
+    if ($null -ne $p.Por) {
+        $w.Cells[7].Style.Font = $czcionkaGruba
+        if ([int]$p.Por -gt 0) { $w.Cells[7].Style.ForeColor = Kolor 'UWAGA' }
+        elseif ([int]$p.Por -eq 0) { $w.Cells[7].Style.ForeColor = Kolor 'INFO' }
+        else { $w.Cells[7].Style.ForeColor = $kolorSzary }
+    }
+}
+
+function Filtruj-PlikiProducenta {
+    $pr = $stan.PR
+    $tryb = $pr.Filtr.SelectedIndex
+    $pr.Siatka.CurrentCell = $null
+    foreach ($r in $pr.Siatka.Rows) {
+        $p = $r.Tag
+        $widoczny = $true
+        switch ($tryb) {
+            0 { $widoczny = ($p.Rodzaj -ne 'Narzędzie') }
+            1 { $widoczny = ($p.Rodzaj -eq 'BIOS') }
+            2 { $widoczny = ($p.Rodzaj -eq 'Sterownik' -or $p.Rodzaj -eq 'Firmware') }
+            3 { $widoczny = ($null -ne $p.Por -and [int]$p.Por -gt 0) }
+        }
+        $r.Visible = $widoczny
+    }
+}
+
+function Pokaz-NowyBiosWSiatce($wynik) {
+    $biosy = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'BIOS' })
+    if ($biosy.Count -eq 0) { return }
+    $nowe = @($biosy | Where-Object { $null -ne $_.Por -and [int]$_.Por -gt 0 -and -not $_.Beta } | Sort-Object -Property Data -Descending)
+    foreach ($r in $siatkaD.Rows) {
+        if ([string]$r.Tag.Nazwa -notlike 'BIOS / UEFI:*') { continue }
+        if ($nowe.Count -gt 0) {
+            $d = ''
+            if ($nowe[0].Data) { $d = ' (' + ([datetime]$nowe[0].Data).ToString('yyyy-MM-dd') + ')' }
+            $r.Cells[5].Value = 'NOWSZY BIOS u producenta: ' + $nowe[0].Wersja + $d + ' - kliknij dwukrotnie'
+            $r.Cells[5].Style.ForeColor = Kolor 'UWAGA'
+            $r.Cells[5].Style.Font = $czcionkaGruba
+        } else {
+            $r.Cells[5].Value = 'aktualny według strony ' + $wynik.Producent
+            $r.Cells[5].Style.ForeColor = Kolor 'OK'
+            $r.Cells[5].Style.Font = $czcionka
+        }
+        break
+    }
+}
+
+function Wczytaj-PlikiProducenta([int]$wybrany) {
+    $pr = $stan.PR
+    $g = $pr.Siatka
+    $g.Rows.Clear()
+    $pr.Panel.Enabled = $false
+    $pr.Gora.Enabled = $false
+    Zajety $true
+    try {
+        if (-not $pr.Info) { $pr.Info = Info-Komputera }
+        $info = $pr.Info
+        $opisModelu = $info.Producent + ' ' + $info.Model
+        if (-not $info.Laptop -and $info.Plyta) { $opisModelu = $info.PlytaProducent + ' ' + $info.Plyta }
+        Log ('Szukam BIOS-u i sterowników u producenta: ' + $opisModelu.Trim() + ' (do minuty)...')
+        $wynik = Szukaj-UProducenta $info $wybrany
+        if ($pr.Okno.IsDisposed) { return }
+        $pr.Wynik = $wynik
+        $zainstalowane = @(foreach ($r in $siatkaD.Rows) { $r.Tag })
+        if ($zainstalowane.Count -eq 0) { try { $zainstalowane = @(Pobierz-Sterowniki) } catch { } }
+        Oznacz-PlikiProducenta $wynik $zainstalowane
+        foreach ($p in $wynik.Pliki) { Dodaj-WierszProducenta $g $p }
+        if ($g.Rows.Count -gt 0) { $g.Sort($g.Columns[1], [System.ComponentModel.ListSortDirection]::Ascending) }
+
+        $pr.Laduje = $true
+        $pr.Model.Items.Clear()
+        foreach ($k in @($wynik.Kandydaci)) { [void]$pr.Model.Items.Add([string]$k.Nazwa) }
+        if ($pr.Model.Items.Count -gt 0) { $pr.Model.SelectedIndex = [math]::Min([int]$wynik.Wybrany, $pr.Model.Items.Count - 1) }
+        $pr.Laduje = $false
+        $pr.Model.Visible = ($pr.Model.Items.Count -gt 1)
+        $pr.ModelEtykieta.Visible = $pr.Model.Visible
+
+        $tytul = ($wynik.Producent + ' ' + $wynik.Model).Trim()
+        $biosTxt = $info.Bios
+        if ($info.BiosData) { $biosTxt = $biosTxt + ' z ' + ([datetime]$info.BiosData).ToString('yyyy-MM-dd') }
+        $opis = 'Zainstalowany BIOS: ' + $biosTxt + '.   Pliki prosto z serwera producenta, z kontrolą sumy. Sterowniki instalują się po cichu (pnputil) albo instalatorem producenta. ' +
+            'BIOS: program skopiuje go na pendrive i uruchomi komputer prosto do BIOS-u.'
+        if ($wynik.Uwagi) { $opis = $wynik.Uwagi + '   ' + $opis }
+        $pr.Naglowek.Controls[1].Text = $tytul
+        $pr.Naglowek.Controls[0].Text = $opis
+        Filtruj-PlikiProducenta
+
+        $ileB = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'BIOS' }).Count
+        $ileS = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'Sterownik' }).Count
+        $nowsze = @($wynik.Pliki | Where-Object { $null -ne $_.Por -and [int]$_.Por -gt 0 }).Count
+        Log ($wynik.Producent + ': BIOS-ów: ' + $ileB + ', sterowników: ' + $ileS + ', nowszych niż zainstalowane: ' + $nowsze + '.')
+        if ($wynik.Uwagi) { Log ('  ' + $wynik.Uwagi) }
+        Pokaz-NowyBiosWSiatce $wynik
+    } finally {
+        Zajety $false
+        if (-not $pr.Okno.IsDisposed) { $pr.Panel.Enabled = $true; $pr.Gora.Enabled = $true }
+    }
+}
+
+function Zaznacz-NowszeProducenta {
+    $pr = $stan.PR
+    $najnowszyBios = @(foreach ($r in $pr.Siatka.Rows) { if ($r.Tag.Rodzaj -eq 'BIOS' -and -not $r.Tag.Beta) { $r.Tag } }) | Sort-Object -Property Data -Descending | Select-Object -First 1
+    $ile = 0
+    foreach ($r in $pr.Siatka.Rows) {
+        $p = $r.Tag
+        $tak = ($null -ne $p.Por -and [int]$p.Por -gt 0 -and -not $p.Beta)
+        if ($p.Rodzaj -eq 'BIOS') { $tak = $tak -and [object]::ReferenceEquals($p, $najnowszyBios) }
+        $r.Cells[0].Value = [bool]$tak
+        if ($tak) { $ile++ }
+    }
+    if ($ile -eq 0) { Info 'Nie ma nowszych wersji niż zainstalowane (wśród tych, które da się porównać). Zaznacz pliki ręcznie.' }
+}
+
+function Instaluj-PlikiProducenta([bool]$tylkoPobierz) {
+    $pr = $stan.PR
+    $wiersze = @(Zaznaczone-Wiersze $pr.Siatka)
+    if ($wiersze.Count -eq 0) { Info 'Zaznacz pliki na liście (pole "Wybierz") albo kliknij "Zaznacz nowsze".'; return }
+    $pliki = @($wiersze | ForEach-Object { $_.Tag })
+    $biosy = @($pliki | Where-Object { $_.Rodzaj -eq 'BIOS' })
+    if ($biosy.Count -gt 1) { Info 'Zaznacz tylko jedną wersję BIOS-u.'; return }
+    if (-not $tylkoPobierz -and -not (Wymaga-Admina)) { return }
+    $opisy = @($pliki | ForEach-Object { '- ' + $_.Rodzaj + ': ' + $_.Nazwa + ' (' + $_.Wersja + ')' })
+    if ($opisy.Count -gt 14) { $opisy = @($opisy[0..13]) + @('- ... i ' + ($opisy.Count - 14) + ' więcej') }
+    if ($tylkoPobierz) {
+        $pytanie = 'Pobrać ' + $pliki.Count + ' plik(ów) od producenta do folderu Pobrane?'
+    } else {
+        $pytanie = 'Pobrać i zainstalować ' + $pliki.Count + ' plik(ów) od producenta?'
+        if ($biosy.Count -eq 1) {
+            $pytanie = $pytanie + $NL + $NL + 'BIOS: program przygotuje pendrive (albo uruchomi narzędzie producenta) - samą aktualizację robi się w BIOS-ie. Podłącz zasilacz.'
+            if ($null -ne $biosy[0].Por -and [int]$biosy[0].Por -lt 0) { $pytanie = $pytanie + $NL + 'To STARSZY BIOS niż zainstalowany.' }
+            if ($biosy[0].Beta) { $pytanie = $pytanie + $NL + 'To wersja testowa (beta).' }
+        }
+        if (@($pliki | Where-Object { $_.Rodzaj -ne 'BIOS' -and $null -ne $_.Por -and [int]$_.Por -lt 0 }).Count) {
+            $pytanie = $pytanie + $NL + 'Część wersji jest starsza od zainstalowanych.'
+        }
+    }
+    if (-not (Pytanie ($pytanie + $NL + $NL + ($opisy -join $NL)))) { return }
+    $restart = $false
+    $stan.Interaktywny = $false
+    $folder = $null
+    $zapisane = @()
+    $pr.Panel.Enabled = $false
+    $pr.Gora.Enabled = $false
+    Zajety $true
+    try {
+        if (-not $tylkoPobierz -and @($pliki | Where-Object { $_.Rodzaj -ne 'BIOS' }).Count) { Utworz-PunktPrzywracania 'Przed instalacja sterownikow od producenta' }
+        $folder = Folder-Roboczy
+        foreach ($r in $wiersze) {
+            $p = $r.Tag
+            Ustaw-StanWiersza $r 'pobieram...' 'INFO'
+            try {
+                $plik = Pobierz-PlikProducenta $p $folder
+                if ($tylkoPobierz) {
+                    $cel = Zapisz-WPobranych $plik
+                    $zapisane += $cel
+                    Log ('  zapisano: ' + $cel)
+                    Ustaw-StanWiersza $r 'pobrano do Pobranych' 'OK'
+                } else {
+                    Ustaw-StanWiersza $r 'instaluję...' 'INFO'
+                    $w = Zainstaluj-PlikProducenta $p $plik $folder $pr.Wynik
+                    Log ('  ' + $p.Nazwa + ' ' + $p.Wersja + ': ' + $w.Opis)
+                    if ($w.Ok) {
+                        Ustaw-StanWiersza $r $w.Opis 'OK'
+                        if ($p.Rodzaj -ne 'BIOS') { Zapisz-Prace 'Sterowniki' ($p.Rodzaj + ' od producenta: ' + $p.Nazwa + ' ' + $p.Wersja) }
+                        $pr.Zainstalowano = $true
+                    } else {
+                        Ustaw-StanWiersza $r $w.Opis 'UWAGA'
+                    }
+                    if ($w.Restart) { $restart = $true }
+                }
+            } catch {
+                Log ('  BŁĄD (' + $p.Nazwa + '): ' + $_.Exception.Message)
+                Ustaw-StanWiersza $r ('błąd: ' + $_.Exception.Message) 'ŹLE'
+            }
+            $r.Cells[0].Value = $false
+        }
+        if ($zapisane.Count -gt 0) { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $zapisane[-1] + '"') }
+    } finally {
+        # gdy dzialal instalator producenta, pliki zostaja (moze jeszcze z nich korzystac); Czyszczenie usunie je pozniej
+        if ($folder -and -not $stan.Interaktywny) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+        Zajety $false
+        if (-not $pr.Okno.IsDisposed) { $pr.Panel.Enabled = $true; $pr.Gora.Enabled = $true }
+    }
+    if ($restart) { Info 'Uruchom ponownie komputer, żeby dokończyć instalację.' }
+}
+
+function Pokaz-PlikiProducenta {
+    $okno = New-Object System.Windows.Forms.Form
+    $okno.Text = 'BIOS i sterowniki od producenta'
+    $okno.Size = New-Object System.Drawing.Size([math]::Min((Px 1200), $szerokoscOkna - 40), [math]::Min((Px 720), $wysokoscOkna - 40))
+    $okno.StartPosition = 'CenterParent'
+    $okno.Icon = $form.Icon
+    $okno.Font = $czcionka
+    $okno.BackColor = [System.Drawing.Color]::White
+
+    $naglowek = Nowy-Naglowek 'Szukam u producenta...' 'Program pyta serwer producenta o BIOS i sterowniki dokładnie dla tego modelu.'
+    $gora = Nowy-PanelPrzyciskow
+    $gora.Dock = 'Top'
+    [void](Nowa-Etykieta $gora 'Pokaż:' 4)
+    $filtr = Nowa-Lista $gora 250 @('BIOS i sterowniki', 'Tylko BIOS', 'Tylko sterowniki', 'Nowsze niż zainstalowane', 'Wszystko (z programami producenta)')
+    $etykietaModelu = Nowa-Etykieta $gora 'Model:' 14
+    $model = Nowa-Lista $gora 330 @()
+    $etykietaModelu.Visible = $false
+    $model.Visible = $false
+
+    $siatka = Nowa-Siatka
+    Dodaj-Kolumne $siatka 'Check' 'Wybierz' 64 ''
+    Dodaj-Kolumne $siatka 'Text' 'Rodzaj' 150 'Waga'
+    Dodaj-Kolumne $siatka 'Text' 'Nazwa i opis' 0 ''
+    Dodaj-Kolumne $siatka 'Text' 'Wersja' 130 ''
+    Dodaj-Kolumne $siatka 'Text' 'Data' 100 'DataSort'
+    Dodaj-Kolumne $siatka 'Text' 'Rozmiar' 85 'Bajty'
+    Dodaj-Kolumne $siatka 'Text' 'Zainstalowany' 130 ''
+    Dodaj-Kolumne $siatka 'Text' 'Stan' 150 ''
+
+    $panel = Nowy-PanelPrzyciskow
+    $bInstaluj = Nowy-Przycisk $panel 'Pobierz i zainstaluj zaznaczone' $true
+    $bPobierz = Nowy-Przycisk $panel 'Tylko pobierz' $false
+    $bNowsze = Nowy-Przycisk $panel 'Zaznacz nowsze' $false
+    $bOdznacz = Nowy-Przycisk $panel 'Odznacz wszystko' $false
+    $bStrona = Nowy-Przycisk $panel 'Strona producenta' $false
+    $bSzukaj = Nowy-Przycisk $panel 'Szukaj ponownie' $false
+    $bZamknij = Nowy-Przycisk $panel 'Zamknij' $false
+
+    $okno.Controls.Add($siatka)
+    $okno.Controls.Add($gora)
+    $okno.Controls.Add($naglowek)
+    $okno.Controls.Add($panel)
+
+    $stan.PR = @{ Okno = $okno; Siatka = $siatka; Panel = $panel; Gora = $gora; Naglowek = $naglowek; Filtr = $filtr; Model = $model
+        ModelEtykieta = $etykietaModelu; Info = $null; Wynik = $null; Laduje = $false; Zainstalowano = $false }
+    $okno.Add_Shown({ Wczytaj-PlikiProducenta 0 })
+    $filtr.Add_SelectedIndexChanged({ if ($stan.PR.Siatka.Rows.Count -gt 0) { Filtruj-PlikiProducenta } })
+    $model.Add_SelectedIndexChanged({ if (-not $stan.PR.Laduje -and $stan.PR.Model.SelectedIndex -ge 0) { Wczytaj-PlikiProducenta $stan.PR.Model.SelectedIndex } })
+    $bInstaluj.Add_Click({ Instaluj-PlikiProducenta $false })
+    $bPobierz.Add_Click({ Instaluj-PlikiProducenta $true })
+    $bNowsze.Add_Click({ Zaznacz-NowszeProducenta })
+    $bOdznacz.Add_Click({ foreach ($r in $stan.PR.Siatka.Rows) { $r.Cells[0].Value = $false } })
+    $bStrona.Add_Click({
+        $adres = ''
+        if ($stan.PR.Wynik) { $adres = [string]$stan.PR.Wynik.Strona }
+        if (-not $adres) { $adres = (Strona-Producenta).Adres }
+        Start-Process -FilePath $adres
+    })
+    $bSzukaj.Add_Click({ $stan.PR.Info = $null; Wczytaj-PlikiProducenta $stan.PR.Model.SelectedIndex })
+    $bZamknij.Add_Click({ $stan.PR.Okno.Close() })
+    $siatka.Add_CellDoubleClick({
+        param($nadawca, $e)
+        if ($e.RowIndex -ge 0 -and $e.ColumnIndex -gt 0) {
+            $p = $nadawca.Rows[$e.RowIndex].Tag
+            if ($p.Opis) { Info ($p.Nazwa + ' ' + $p.Wersja + $NL + $NL + $p.Opis) }
+        }
+    })
+    $okno.Add_FormClosing({ param($nadawca, $e) if ($stan.Zajety -gt 0) { $e.Cancel = $true } })
+    [void]$okno.ShowDialog($form)
+    $okno.Dispose()
+    if ($stan.PR.Zainstalowano) {
+        $wynik = $stan.PR.Wynik
+        Zajety $true
+        try { Wypelnij-Sterowniki } finally { Zajety $false }
+        if ($wynik) { Pokaz-NowyBiosWSiatce $wynik }
+    }
+}
+
+$btnDPlikiProducenta.Add_Click({ Pokaz-PlikiProducenta })
 
 # =====================================================================
 #  OKNO: NAJWIEKSZE FOLDERY
