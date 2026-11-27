@@ -26,7 +26,7 @@
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.3'
+$WersjaNarzedzia = '4.4'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
 $NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
@@ -96,7 +96,7 @@ $stan = @{
     KluczWindows = ''; CzasStartu = $null; PunktUtworzony = $false; Winget = $null; ZainstalowaneWinget = @()
     FolderKopiiDanych = ''; OstatniaKopia = ''; NF = $null; Zajety = 0
     Ja = ''; Klient = $null; InneKonto = $false; Profile = @(); ProfilKopii = $null; Menu = (New-Object System.Collections.ArrayList)
-    WS = $null; PR = $null; WersjeWinget = @{}; Blokada = @{}; Interaktywny = $false
+    WS = $null; PR = $null; WersjeWinget = @{}; Blokada = @{}; Interaktywny = $false; CDP = $null; TrybPrzegladarki = ''; WynikProducenta = $null
 }
 
 # ---------- kolory ----------
@@ -2671,6 +2671,8 @@ function Zapisz-Raport {
 # Program sam pyta serwery producenta o liste plikow dla tego modelu, pobiera wybrane,
 # sprawdza sumy kontrolne, rozpakowuje (w razie potrzeby 7-Zip) i instaluje.
 $apiGigabyte = 'https://www.gigabyte.com/iisApplicationNuxt/api/proxy/api/v1.0'
+$UAPrzegladarki = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+$dodatkoweArgumentyPrzegladarki = ''
 $wykluczoneInstalatory = 'efiflash|^afu|biosrenamer|flashrom|^fptw|amidewin|autoexec|uninst|readme|vcredist|dotnet|ndp\d'
 $rodzajePlikow = @{ 'BIOS' = 0; 'Sterownik' = 1; 'Firmware' = 2; 'Narzędzie' = 3 }
 
@@ -2761,6 +2763,24 @@ function Uruchom-ZWyjsciem([string]$plik, [string]$argumenty, [int]$limit, [stri
     [pscustomobject]@{ Kod = $kod; Tekst = $tekst }
 }
 
+function Odswiez-Okno { try { [System.Windows.Forms.Application]::DoEvents() } catch { } }
+
+function Czekaj([int]$ms) {
+    $koniec = (Get-Date).AddMilliseconds($ms)
+    do { Odswiez-Okno; Start-Sleep -Milliseconds 40 } while ((Get-Date) -lt $koniec)
+}
+
+function Czekaj-NaZadanie($zadanie, [int]$limitMs) {
+    # zadanie .NET (Task) - czekamy, a okno programu dalej reaguje
+    $koniec = (Get-Date).AddMilliseconds($limitMs)
+    while (-not $zadanie.IsCompleted) {
+        Odswiez-Okno
+        Start-Sleep -Milliseconds 20
+        if ((Get-Date) -gt $koniec) { return $false }
+    }
+    (-not $zadanie.IsFaulted -and -not $zadanie.IsCanceled)
+}
+
 function Sciezka-Przegladarki {
     foreach ($baza in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
         if (-not $baza) { continue }
@@ -2772,29 +2792,296 @@ function Sciezka-Przegladarki {
     $null
 }
 
-function Pobierz-PrzezPrzegladarke([string]$adres, [string]$opis) {
-    # MSI i Gigabyte wpuszczaja tylko prawdziwa przegladarke - Edge w trybie bez okna
-    $exe = Sciezka-Przegladarki
-    if (-not $exe) { return '' }
-    $wersja = 130
-    try { $wersja = [int](([string](Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -split '\.')[0]) } catch { }
-    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + $wersja + '.0.0.0 Safari/537.36'
-    if ($exe -like '*msedge.exe') { $ua = $ua + ' Edg/' + $wersja + '.0.0.0' }
-    $profil = Join-Path $env:TEMP ('serwis_przegladarka_' + [guid]::NewGuid().ToString('N'))
-    $arg = '--headless=new --disable-gpu --no-first-run --no-default-browser-check --disable-extensions --disable-sync --mute-audio ' +
-        '--user-data-dir="' + $profil + '" --user-agent="' + $ua + '" --dump-dom "' + $adres + '"'
-    $w = Uruchom-ZWyjsciem $exe $arg 90 $opis
-    Start-Sleep -Milliseconds 300
-    Remove-Item -LiteralPath $profil -Recurse -Force -ErrorAction SilentlyContinue
-    [string]$w.Tekst
+function Host-Adresu([string]$adres) {
+    try { return ([uri]$adres).Host.ToLower() } catch { return '' }
+}
+
+# ---------- zwykle zapytanie (curl wbudowany w Windows) ----------
+function Pobierz-TekstZKodem([string]$adres, [string]$referer) {
+    $plik = Join-Path $env:TEMP ('serwis_web_' + [guid]::NewGuid().ToString('N') + '.txt')
+    $kod = 0; $tekst = ''
+    $curl = Join-Path $env:windir 'System32\curl.exe'
+    if (Test-Path -LiteralPath $curl) {
+        $arg = '-s -L --max-time 45 --connect-timeout 15 -A "' + $UAPrzegladarki + '" -H "Accept: application/json, text/plain, */*" ' +
+            '-H "Accept-Language: pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"'
+        if ($referer) { $arg = $arg + ' -e "' + $referer + '"' }
+        $arg = $arg + ' -o "' + $plik + '" -w "%{http_code}" "' + $adres + '"'
+        $w = Uruchom-ZWyjsciem $curl $arg 60 'zapytanie'
+        [void][int]::TryParse(([string]$w.Tekst).Trim(), [ref]$kod)
+    } else {
+        try {
+            $naglowki = @{ 'Accept' = 'application/json, text/plain, */*'; 'Accept-Language' = 'pl-PL,pl;q=0.9,en;q=0.8' }
+            if ($referer) { $naglowki['Referer'] = $referer }
+            $r = Invoke-WebRequest -Uri $adres -UseBasicParsing -UserAgent $UAPrzegladarki -Headers $naglowki -TimeoutSec 45 -OutFile $plik -PassThru -ErrorAction Stop
+            $kod = [int]$r.StatusCode
+        } catch {
+            try { $kod = [int]$_.Exception.Response.StatusCode } catch { $kod = 0 }
+        }
+    }
+    if (Test-Path -LiteralPath $plik) {
+        try { $tekst = [IO.File]::ReadAllText($plik, [System.Text.Encoding]::UTF8) } catch { }
+        Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
+    }
+    [pscustomobject]@{ Kod = $kod; Tekst = $tekst }
 }
 
 function Pobierz-Tekst([string]$adres, [string]$opis) {
-    $plik = Join-Path $env:TEMP ('serwis_web_' + [guid]::NewGuid().ToString('N') + '.txt')
-    $tekst = ''
-    if (Pobierz-Plik $adres $plik '' $opis) { try { $tekst = [IO.File]::ReadAllText($plik, [System.Text.Encoding]::UTF8) } catch { } }
-    Remove-Item -LiteralPath $plik -Force -ErrorAction SilentlyContinue
-    $tekst
+    $w = Pobierz-TekstZKodem $adres ''
+    if ($w.Kod -eq 200) { return $w.Tekst }
+    ''
+}
+
+# ---------- prawdziwa przegladarka sterowana przez DevTools (Edge albo Chrome) ----------
+# MSI i Gigabyte chronia swoje strony przed programami (Akamai). Przegladarka otwiera strone producenta
+# tak jak czlowiek, a potem z tej strony pyta o liste plikow - serwer widzi zwykla przegladarke.
+function Wolny-Port {
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $l.Start()
+    $port = $l.LocalEndpoint.Port
+    $l.Stop()
+    $port
+}
+
+function Pobierz-Lokalnie([string]$adres) {
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Encoding = [System.Text.Encoding]::UTF8
+        return $wc.DownloadString($adres)
+    } catch { return '' }
+}
+
+function Uruchom-PrzegladarkeCDP([bool]$bezOkna) {
+    $exe = Sciezka-Przegladarki
+    if (-not $exe) { return $null }
+    $port = Wolny-Port
+    $profil = Join-Path $env:TEMP ('serwis_przegladarka_' + [guid]::NewGuid().ToString('N').Substring(0, 10))
+    New-Item -ItemType Directory -Force -Path $profil | Out-Null
+    $arg = '--remote-debugging-port=' + $port + ' --remote-allow-origins=* --user-data-dir="' + $profil + '" --no-first-run --no-default-browser-check ' +
+        '--disable-extensions --disable-sync --mute-audio --disable-features=Translate --lang=pl-PL'
+    if ($bezOkna) {
+        # bez okna przegladarka przedstawia sie jako "Headless" - podajemy zwykly opis tej samej wersji
+        $wersja = 140
+        try { $wersja = [int](([string](Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -split '\.')[0]) } catch { }
+        if ($wersja -lt 100) { $wersja = 140 }
+        $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + $wersja + '.0.0.0 Safari/537.36'
+        if ($exe -like '*msedge.exe') { $ua = $ua + ' Edg/' + $wersja + '.0.0.0' }
+        $arg = $arg + ' --headless=new --user-agent="' + $ua + '"'
+    } else { $arg = $arg + ' --window-position=-2400,-2400 --window-size=1280,900' }
+    if ($dodatkoweArgumentyPrzegladarki) { $arg = $arg + ' ' + $dodatkoweArgumentyPrzegladarki }
+    $arg = $arg + ' about:blank'
+    try { $proc = Start-Process -FilePath $exe -ArgumentList $arg -PassThru -ErrorAction Stop } catch { return $null }
+    $s = [pscustomobject]@{ Proces = $proc; Port = $port; Profil = $profil; WS = $null; Id = 0; BezOkna = $bezOkna; Host = '' }
+    $ws = ''
+    $koniec = (Get-Date).AddSeconds(25)
+    $zakonczony = $false
+    while (-not $ws -and (Get-Date) -lt $koniec) {
+        Czekaj 300
+        # proces sie zamknal (np. brak ekranu albo blokada) - dajemy jeszcze chwile i konczymy
+        if (-not $zakonczony) { try { if ($proc.HasExited) { $zakonczony = $true; $koniec = [datetime]::Now.AddSeconds(6) } } catch { } }
+        $lista = Czytaj-Json (Pobierz-Lokalnie ('http://127.0.0.1:' + $port + '/json/list'))
+        $strony = @(@($lista) | Where-Object { $_ -and [string]$_.type -eq 'page' -and $_.webSocketDebuggerUrl })
+        $pusta = @($strony | Where-Object { [string]$_.url -eq 'about:blank' })
+        if ($pusta.Count) { $ws = [string]$pusta[0].webSocketDebuggerUrl } elseif ($strony.Count) { $ws = [string]$strony[0].webSocketDebuggerUrl }
+    }
+    if (-not $ws) { Zamknij-PrzegladarkeCDP $s; return $null }
+    try {
+        $klient = New-Object System.Net.WebSockets.ClientWebSocket
+        $klient.Options.Proxy = $null
+        if (-not (Czekaj-NaZadanie ($klient.ConnectAsync([uri]$ws, [System.Threading.CancellationToken]::None)) 10000)) { throw 'brak połączenia' }
+        $s.WS = $klient
+    } catch { Zamknij-PrzegladarkeCDP $s; return $null }
+    $s
+}
+
+function CDP-Odbierz($s, [int]$limitMs) {
+    $bufor = New-Object byte[] 262144
+    $strumien = New-Object System.IO.MemoryStream
+    do {
+        $segment = New-Object System.ArraySegment[byte] -ArgumentList @(, $bufor)
+        $zadanie = $s.WS.ReceiveAsync($segment, [System.Threading.CancellationToken]::None)
+        if (-not (Czekaj-NaZadanie $zadanie $limitMs)) { $s.Id = -1; return $null }
+        $r = $zadanie.Result
+        if ($r.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { $s.Id = -1; return $null }
+        $strumien.Write($bufor, 0, $r.Count)
+    } while (-not $r.EndOfMessage)
+    [System.Text.Encoding]::UTF8.GetString($strumien.ToArray())
+}
+
+function CDP-Polecenie($s, [string]$metoda, $parametry, [int]$limitMs) {
+    if (-not $s -or -not $s.WS -or $s.Id -lt 0) { return $null }
+    $s.Id = $s.Id + 1
+    $id = $s.Id
+    $json = @{ id = $id; method = $metoda; params = $parametry } | ConvertTo-Json -Depth 8 -Compress
+    $bajty = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $segment = New-Object System.ArraySegment[byte] -ArgumentList @(, $bajty)
+    try {
+        $z = $s.WS.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [System.Threading.CancellationToken]::None)
+        if (-not (Czekaj-NaZadanie $z 10000)) { $s.Id = -1; return $null }
+    } catch { $s.Id = -1; return $null }
+    $koniec = (Get-Date).AddMilliseconds($limitMs)
+    while ((Get-Date) -lt $koniec) {
+        $pozostalo = [int][math]::Max(500, ($koniec - (Get-Date)).TotalMilliseconds)
+        $wiadomosc = CDP-Odbierz $s $pozostalo
+        if ($null -eq $wiadomosc) { return $null }
+        # zdarzenia przegladarki pomijamy, czekamy na odpowiedz na nasze polecenie
+        if ($wiadomosc -notmatch ('"id"\s*:\s*' + $id + '\s*[,}]')) { continue }
+        $o = Czytaj-Json $wiadomosc
+        if ($o -and [int]$o.id -eq $id) { return $o }
+    }
+    $null
+}
+
+function CDP-Wykonaj($s, [string]$skrypt, [int]$limitMs) {
+    $o = CDP-Polecenie $s 'Runtime.evaluate' @{ expression = $skrypt; awaitPromise = $true; returnByValue = $true } $limitMs
+    if ($null -eq $o -or $null -eq $o.result -or $null -eq $o.result.result) { return $null }
+    $o.result.result.value
+}
+
+function CDP-Otworz($s, [string]$adres, [int]$limitS) {
+    [void](CDP-Polecenie $s 'Page.navigate' @{ url = $adres } 30000)
+    $koniec = (Get-Date).AddSeconds($limitS)
+    while ((Get-Date) -lt $koniec) {
+        Czekaj 500
+        if ($s.Id -lt 0) { return $false }
+        if ([string](CDP-Wykonaj $s 'document.readyState' 5000) -eq 'complete') {
+            # chwila na skrypty strony (m.in. ochrona przed robotami ustawia ciasteczka)
+            Czekaj 2500
+            return $true
+        }
+    }
+    $false
+}
+
+function CDP-Pobierz($s, [string]$adres, [int]$limitMs) {
+    $skrypt = 'fetch(' + (ConvertTo-Json $adres -Compress) + ', { credentials: "include", headers: { "Accept": "application/json, text/plain, */*" } })' +
+        '.then(function (r) { return r.text().then(function (t) { return r.status + "\n" + t; }); })' +
+        '.catch(function (e) { return "0\n" + e; })'
+    $v = [string](CDP-Wykonaj $s $skrypt $limitMs)
+    $i = $v.IndexOf("`n")
+    $kod = 0
+    if ($i -lt 0) { return [pscustomobject]@{ Kod = 0; Tekst = '' } }
+    [void][int]::TryParse($v.Substring(0, $i), [ref]$kod)
+    [pscustomobject]@{ Kod = $kod; Tekst = $v.Substring($i + 1) }
+}
+
+function Zamknij-PrzegladarkeCDP($s) {
+    if ($null -eq $s) { $s = $stan.CDP; $stan.CDP = $null }
+    if ($null -eq $s) { return }
+    if ($s.WS) {
+        try { [void](CDP-Polecenie $s 'Browser.close' @{} 3000) } catch { }
+        try { $s.WS.Dispose() } catch { }
+    }
+    Czekaj 400
+    try {
+        if ($s.Proces -and -not $s.Proces.HasExited) {
+            try { [void](& taskkill.exe /PID $s.Proces.Id /T /F 2>&1) } catch { }
+            if (-not $s.Proces.HasExited) { $s.Proces.Kill() }
+        }
+    } catch { }
+    for ($i = 0; $i -lt 5 -and (Test-Path -LiteralPath $s.Profil); $i++) {
+        Remove-Item -LiteralPath $s.Profil -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $s.Profil) { Czekaj 600 }
+    }
+}
+
+function Sesja-Przegladarki([bool]$bezOkna, [string]$opis) {
+    if ($stan.CDP -and $stan.CDP.Id -ge 0 -and $stan.CDP.BezOkna -eq $bezOkna) { return $stan.CDP }
+    if ($stan.CDP) { Zamknij-PrzegladarkeCDP $null }
+    $nazwa = 'Edge'
+    $exe = Sciezka-Przegladarki
+    if (-not $exe) { Log '  brak przeglądarki Edge ani Chrome - nie da się ominąć blokady serwera.'; return $null }
+    if ($exe -like '*chrome.exe') { $nazwa = 'Chrome' }
+    if ($bezOkna) { Log ('  ' + $opis + ': otwieram stronę producenta w przeglądarce ' + $nazwa + ' (bez okna)...') }
+    else { Log ('  ' + $opis + ': próbuję jeszcze w zwykłym oknie przeglądarki ' + $nazwa + ' (schowane poza ekranem)...') }
+    $stan.CDP = Uruchom-PrzegladarkeCDP $bezOkna
+    if (-not $stan.CDP) { Log '  nie udało się uruchomić przeglądarki.' }
+    $stan.CDP
+}
+
+function Pobierz-PrzezPrzegladarke([string]$adres, [string]$stronaStartowa, [string]$opis) {
+    # tryb na czas jednego wyszukiwania: najpierw bez okna, gdy serwer go nie wpusci - w schowanym oknie
+    $hostCelu = Host-Adresu $adres
+    if (-not $stronaStartowa) { $stronaStartowa = 'https://' + $hostCelu + '/' }
+    if (-not $stan.TrybPrzegladarki) { $stan.TrybPrzegladarki = 'bez okna' }
+    while ($stan.TrybPrzegladarki -ne 'brak') {
+        $bezOkna = ($stan.TrybPrzegladarki -eq 'bez okna')
+        $s = Sesja-Przegladarki $bezOkna $opis
+        $w = [pscustomobject]@{ Kod = 0; Tekst = '' }
+        if ($s) {
+            if ($s.Host -ne $hostCelu) {
+                [void](CDP-Otworz $s $stronaStartowa 45)
+                $s.Host = $hostCelu
+            }
+            $w = CDP-Pobierz $s $adres 60000
+            if ($w.Kod -eq 0 -and $s.Id -ge 0 -and (CDP-Otworz $s $adres 45)) {
+                # zapytanie ze strony nie przeszlo - otwieramy sam adres listy
+                $s.Host = ''
+                $t = [string](CDP-Wykonaj $s 'document.body ? document.body.innerText : ""' 10000)
+                if ($t) { $w = [pscustomobject]@{ Kod = 200; Tekst = $t } }
+            }
+            Log ('  przez przeglądarkę (' + $stan.TrybPrzegladarki + '): HTTP ' + $w.Kod + ', ' + (Tekst-Rozmiaru ([long]([string]$w.Tekst).Length)))
+            if ($w.Kod -eq 200 -and $null -ne (Czytaj-Json $w.Tekst)) { return [string]$w.Tekst }
+            # zly adres (np. nie ma takiego modelu) - to nie blokada, nie zmieniamy trybu
+            if ($w.Kod -eq 404 -or $w.Kod -eq 400) { return '' }
+        }
+        Zamknij-PrzegladarkeCDP $null
+        if ($bezOkna) { $stan.TrybPrzegladarki = 'w oknie' } else { $stan.TrybPrzegladarki = 'brak' }
+    }
+    ''
+}
+
+function Pobierz-Json([string]$adres, [string]$opis, [string]$stronaStartowa) {
+    # 1) zwykle zapytanie, 2) przegladarka bez okna, 3) przegladarka w schowanym oknie
+    if (-not $stan.Blokada) { $stan.Blokada = @{} }
+    $hostCelu = Host-Adresu $adres
+    if (-not $stan.Blokada.ContainsKey($hostCelu)) {
+        $w = Pobierz-TekstZKodem $adres $stronaStartowa
+        $j = $null
+        if ($w.Kod -eq 200) { $j = Czytaj-Json $w.Tekst }
+        if ($null -ne $j) { return $j }
+        if ($w.Kod -eq 404 -or $w.Kod -eq 400) { Log ('  ' + $opis + ': HTTP ' + $w.Kod + ' (brak takiej strony).'); return $null }
+        $powod = 'HTTP ' + $w.Kod
+        if ($w.Kod -eq 0) { $powod = 'brak odpowiedzi' } elseif ($w.Kod -eq 200) { $powod = 'zamiast listy przyszła strona ochronna' }
+        Log ('  ' + $opis + ': serwer nie wpuścił zwykłego zapytania (' + $powod + ').')
+        $stan.Blokada[$hostCelu] = $true
+    }
+    $t = Pobierz-PrzezPrzegladarke $adres $stronaStartowa $opis
+    if ($t) { return (Czytaj-Json $t) }
+    $null
+}
+
+function Pobierz-PlikPrzezPrzegladarke([string]$adres, [string]$folder, [string]$stronaStartowa) {
+    $s = $stan.CDP
+    if (-not $s -or $s.Id -lt 0) { $s = Sesja-Przegladarki ($stan.TrybPrzegladarki -ne 'w oknie') 'pobieranie' }
+    if (-not $s) { return $null }
+    $cel = Join-Path $folder ('przegladarka_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force -Path $cel | Out-Null
+    $r = CDP-Polecenie $s 'Browser.setDownloadBehavior' @{ behavior = 'allow'; downloadPath = $cel } 10000
+    if ($null -eq $r -or $r.error) { [void](CDP-Polecenie $s 'Page.setDownloadBehavior' @{ behavior = 'allow'; downloadPath = $cel } 10000) }
+    $hostStrony = Host-Adresu $stronaStartowa
+    if ($stronaStartowa -and $s.Host -ne $hostStrony) { [void](CDP-Otworz $s $stronaStartowa 45); $s.Host = $hostStrony }
+    Log '  pobieram przez przeglądarkę...'
+    [void](CDP-Polecenie $s 'Page.navigate' @{ url = $adres } 30000)
+    $s.Host = ''
+    $start = Get-Date; $ostatniLog = Get-Date; $poprzedni = -1
+    while (((Get-Date) - $start).TotalMinutes -lt 20) {
+        Czekaj 1000
+        $pliki = @(Get-ChildItem -LiteralPath $cel -File -ErrorAction SilentlyContinue)
+        $wToku = @($pliki | Where-Object { $_.Extension -match '(?i)crdownload|tmp|partial' })
+        $gotowe = @($pliki | Where-Object { $_.Extension -notmatch '(?i)crdownload|tmp|partial' -and $_.Length -gt 0 })
+        if ($gotowe.Count -gt 0 -and $wToku.Count -eq 0) {
+            if ($gotowe[0].Length -eq $poprzedni) { return $gotowe[0].FullName }
+            $poprzedni = $gotowe[0].Length
+        } elseif ($pliki.Count -eq 0 -and ((Get-Date) - $start).TotalSeconds -gt 45) {
+            return $null
+        }
+        if (((Get-Date) - $ostatniLog).TotalSeconds -ge 15 -and $wToku.Count) {
+            $ostatniLog = Get-Date
+            Log ('  pobrano ' + (Tekst-Rozmiaru ([long]$wToku[0].Length)) + '...')
+        }
+    }
+    $null
 }
 
 function Json-ZeStrony([string]$html) {
@@ -2802,21 +3089,6 @@ function Json-ZeStrony([string]$html) {
     $m = [regex]::Match($html, '<pre[^>]*>([\s\S]*?)</pre>')
     if ($m.Success) { return (Czytaj-Json ([System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value))) }
     Czytaj-Json $html
-}
-
-function Pobierz-Json([string]$adres, [string]$opis) {
-    # najpierw zwykle zapytanie; gdy serwer go nie wpuszcza, dalej od razu przez przegladarke
-    if (-not $stan.Blokada) { $stan.Blokada = @{} }
-    $host1 = ''
-    try { $host1 = ([uri]$adres).Host } catch { }
-    if (-not $stan.Blokada.ContainsKey($host1)) {
-        $j = Czytaj-Json (Pobierz-Tekst $adres $opis)
-        if ($null -ne $j) { return $j }
-        $stan.Blokada[$host1] = $true
-    }
-    $html = Pobierz-PrzezPrzegladarke $adres $opis
-    if ($html) { return (Json-ZeStrony $html) }
-    $null
 }
 
 # ---------- opis pojedynczego pliku od producenta ----------
@@ -2861,7 +3133,7 @@ function Nowy-PlikProducenta([string]$rodzaj, [string]$kategoria, [string]$nazwa
     $ticks = [long]0
     if ($data) { $ticks = ([datetime]$data).Ticks }
     [pscustomobject]@{ Rodzaj = $rodzaj; Kategoria = $kategoria; Nazwa = $nazwa; Wersja = $wersja; WersjaPor = $wersja; Data = $data; DataSort = $ticks
-        Bajty = $bajty; Adres = $adres; Opis = $opis; Sha256 = ''; Md5 = ''; Beta = $false; Zainstalowany = ''; Por = $null
+        Bajty = $bajty; Adres = $adres; Opis = $opis; Sha256 = ''; Md5 = ''; Beta = $false; InnaLinia = $false; Zainstalowany = ''; Por = $null
         Lenovo = $null; Waga = ($w * 100000 + (100000 - $dni)) }
 }
 
@@ -2944,16 +3216,29 @@ function Produkty-MSI($info) {
     if ($info.Win11) { $os = 'Win11 64' }
     foreach ($slug in $slugi) {
         $baza = 'https://www.msi.com/api/v1/product/support/panel?product=' + [uri]::EscapeDataString($slug)
-        $wpisyB = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=bios') 'MSI: lista BIOS'))
-        $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver&os=' + [uri]::EscapeDataString($os)) 'MSI: lista sterowników'))
-        if ($wpisyS.Count -eq 0 -and $wpisyB.Count -gt 0) { $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver') 'MSI: lista sterowników')) }
+        $strona = 'https://www.msi.com/' + $rodzajStrony + '/' + $slug + '/support'
+        Log ('  MSI: model ' + $slug)
+        $daneB = Pobierz-Json ($baza + '&type=bios') 'MSI: lista BIOS' $strona
+        $wpisyB = @(Wpisy-MSI $daneB)
+        if ($null -eq $daneB -and $stan.TrybPrzegladarki -eq 'brak') { break }
+        $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver&os=' + [uri]::EscapeDataString($os)) 'MSI: lista sterowników' $strona))
+        if ($wpisyS.Count -eq 0 -and $wpisyB.Count -gt 0) { $wpisyS = @(Wpisy-MSI (Pobierz-Json ($baza + '&type=driver') 'MSI: lista sterowników' $strona)) }
         if ($wpisyB.Count -eq 0 -and $wpisyS.Count -eq 0) { continue }
         $w.Model = $slug.Replace('-', ' ')
-        $w.Strona = 'https://www.msi.com/' + $rodzajStrony + '/' + $slug + '/support'
+        $w.Strona = $strona
         $pominiete = 0
+        # MS-7E56 to np. B850 GAMING PLUS WIFI (BIOS 1.xxx = 7E56v1xxx) i PRO B850-P WIFI (7E56v2xxx)
+        $linia = ''
+        if ($info.Bios -match '^(\d+)\.') { $linia = $Matches[1] }
         foreach ($x in $wpisyB) {
-            if ($kod -and ([string]$x.Wpis.download_version) -notlike ($kod + 'v*')) { $pominiete++; continue }
-            [void]$w.Pliki.Add((Plik-ZWpisuMSI $x 'BIOS' $kod))
+            $wersjaB = [string]$x.Wpis.download_version
+            if ($kod -and $wersjaB -notlike ($kod + 'v*')) { $pominiete++; continue }
+            $p = Plik-ZWpisuMSI $x 'BIOS' $kod
+            if ($kod -and $linia -and $wersjaB -notlike ($kod + 'v' + $linia + '*')) {
+                $p.InnaLinia = $true
+                $p.Nazwa = $p.Nazwa + '   (inna linia BIOS niż zainstalowana - przeczytaj opis u MSI)'
+            }
+            [void]$w.Pliki.Add($p)
         }
         if ($pominiete -gt 0) { $w.Uwagi = 'Pominięto ' + $pominiete + ' plików BIOS dla innej płyty niż MS-' + $kod + '.' }
         $kodOs = 'Win10'
@@ -2965,7 +3250,9 @@ function Produkty-MSI($info) {
         }
         return $w
     }
-    $w.Uwagi = 'MSI nie zwróciło listy dla tego modelu (' + ($slugi -join ', ') + '). Otwórz stronę producenta.'
+    if ($stan.TrybPrzegladarki -eq 'brak') { $w.Uwagi = 'Serwer MSI nie wpuścił programu ani przeglądarki (szczegóły w dzienniku na dole). Otwórz stronę producenta.' }
+    elseif ($slugi.Count -eq 0) { $w.Uwagi = 'Nie rozpoznano modelu płyty - kliknij "Wpisz model".' }
+    else { $w.Uwagi = 'MSI nie ma listy dla modelu ' + ($slugi -join ', ') + ' - kliknij "Wpisz model" albo otwórz stronę producenta.' }
     $w.Strona = 'https://www.msi.com/search/' + [uri]::EscapeDataString([string]($nazwy | Where-Object { $_ } | Select-Object -First 1))
     $w
 }
@@ -3026,9 +3313,9 @@ function Pliki-Gigabyte($dane, $info) {
 
 function Produkty-Gigabyte($info, [int]$wybrany) {
     $w = Nowy-WynikProducenta 'Gigabyte' $info
-    $j = Pobierz-Json ($apiGigabyte + '/Support/global/DownloadCenter/2/GetProducts') 'Gigabyte: lista płyt'
+    $j = Pobierz-Json ($apiGigabyte + '/Support/global/DownloadCenter/2/GetProducts') 'Gigabyte: lista płyt' 'https://www.gigabyte.com/'
     if ($null -eq $j) {
-        $w.Uwagi = 'Serwer Gigabyte nie odpowiedział (brak internetu albo blokada).'
+        $w.Uwagi = 'Serwer Gigabyte nie wpuścił programu ani przeglądarki (szczegóły w dzienniku na dole).'
         $w.Strona = 'https://www.gigabyte.com/Search?kw=' + [uri]::EscapeDataString($info.Plyta)
         return $w
     }
@@ -3044,7 +3331,7 @@ function Produkty-Gigabyte($info, [int]$wybrany) {
     $w.Model = $k.Nazwa
     $slug = (($k.Nazwa -replace '[().]', '').Trim() -replace '\s+', '-')
     $w.Strona = 'https://www.gigabyte.com/Motherboard/' + $slug + '/support'
-    $dane = Pobierz-Json ($apiGigabyte + '/Consumer/global/GetProductTabDataAsync/Support/' + $k.Klucz) 'Gigabyte: pliki płyty'
+    $dane = Pobierz-Json ($apiGigabyte + '/Consumer/global/GetProductTabDataAsync/Support/' + $k.Klucz) 'Gigabyte: pliki płyty' $w.Strona
     foreach ($p in (Pliki-Gigabyte $dane $info)) { [void]$w.Pliki.Add($p) }
     if ($w.Kandydaci.Count -gt 1 -and -not $k.Pasuje) { $w.Uwagi = 'Kilka wersji (rev.) tej płyty - sprawdź na naklejce płyty i wybierz właściwą w polu "Model".' }
     $w
@@ -3093,9 +3380,10 @@ function Produkty-ASUS($info) {
     foreach ($m in $modele) {
         $e = [uri]::EscapeDataString($m)
         $bazowe = 'https://www.asus.com/support/webapi/ProductV2/'
-        $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=' + $osid) 'ASUS: sterowniki') $false)
-        if ($s.Count -eq 0 -and $osid -ne 52) { $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=52') 'ASUS: sterowniki') $false) }
-        $b = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDBIOS?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=') 'ASUS: BIOS') $true)
+        $sw = 'https://www.asus.com/support/'
+        $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=' + $osid) 'ASUS: sterowniki' $sw) $false)
+        if ($s.Count -eq 0 -and $osid -ne 52) { $s = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDDrivers?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=&osid=52') 'ASUS: sterowniki' $sw) $false) }
+        $b = @(Pliki-ASUS (Pobierz-Json ($bazowe + 'GetPDBIOS?website=global&model=' + $e + '&pdhashedid=&pdid=&cpu=') 'ASUS: BIOS' $sw) $true)
         if ($s.Count -eq 0 -and $b.Count -eq 0) { continue }
         $w.Model = $m
         $w.Strona = 'https://www.asus.com/supportonly/' + $e + '/helpdesk_download/'
@@ -3210,6 +3498,42 @@ function Szukaj-UProducenta($info, [int]$wybrany) {
     Produkty-Inne $info $producent
 }
 
+function Opis-Modelu($info) {
+    $t = $info.Producent + ' ' + $info.Model
+    if (-not $info.Laptop -and $info.Plyta) { $t = $info.PlytaProducent + ' ' + $info.Plyta }
+    $t.Trim()
+}
+
+function Pobierz-WynikProducenta([bool]$odNowa, [int]$wybrany, $info) {
+    # wynik z ostatnich 30 minut (np. z "Sprawdź aktualizacje") bierzemy z pamięci
+    $c = $stan.WynikProducenta
+    if (-not $odNowa -and -not $info -and $c -and [int]$c.Wybrany -eq $wybrany -and ((Get-Date) - $c.Czas).TotalMinutes -lt 30) { return $c.Wynik }
+    if (-not $info) { $info = Info-Komputera }
+    Log ('Szukam BIOS-u i sterowników na stronie producenta: ' + (Opis-Modelu $info) + ' (do 2 minut)...')
+    $stan.Blokada = @{}
+    $stan.TrybPrzegladarki = ''
+    $wynik = $null
+    try {
+        $wynik = Szukaj-UProducenta $info $wybrany
+    } catch {
+        Log ('  błąd podczas szukania u producenta: ' + $_.Exception.Message)
+        $wynik = Nowy-WynikProducenta (Wykryj-Producenta $info) $info
+        $wynik.Uwagi = 'Błąd podczas szukania: ' + $_.Exception.Message
+    } finally { Zamknij-PrzegladarkeCDP $null }
+    $zainstalowane = @(foreach ($r in $siatkaD.Rows) { $r.Tag })
+    if ($zainstalowane.Count -eq 0) { try { $zainstalowane = @(Pobierz-Sterowniki) } catch { } }
+    Oznacz-PlikiProducenta $wynik $zainstalowane
+    $ileB = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'BIOS' }).Count
+    $ileS = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'Sterownik' }).Count
+    $nowsze = @($wynik.Pliki | Where-Object { $null -ne $_.Por -and [int]$_.Por -gt 0 }).Count
+    if (@($wynik.Pliki).Count -gt 0) {
+        $stan.WynikProducenta = @{ Wynik = $wynik; Czas = (Get-Date); Wybrany = [int]$wynik.Wybrany }
+        Log ($wynik.Producent + ' ' + $wynik.Model + ': BIOS-ów: ' + $ileB + ', sterowników: ' + $ileS + ', nowszych niż zainstalowane: ' + $nowsze + '.')
+    }
+    if ($wynik.Uwagi) { Log ('  ' + $wynik.Uwagi) }
+    $wynik
+}
+
 # ---------- porownanie z tym, co jest zainstalowane ----------
 function Dopasuj-Sterownik($p, $zainstalowane) {
     $tekst = ($p.Kategoria + ' ' + $p.Nazwa).ToUpper()
@@ -3248,6 +3572,7 @@ function Oznacz-PlikiProducenta($wynik, $zainstalowane) {
         if ($p.Rodzaj -eq 'BIOS') {
             $p.Zainstalowany = $wynik.Info.Bios
             $p.Por = Porownaj-ZZainstalowana $p $wynik.BiosPor $wynik.Info.BiosData
+            if ($p.InnaLinia) { $p.Por = $null }
             continue
         }
         if ($p.Rodzaj -ne 'Sterownik') { continue }
@@ -3311,7 +3636,7 @@ function Folder-Pobranych {
 function Pobierz-PrzezPrzegladarkeRecznie([string]$adres, [string]$nazwa) {
     $foldery = @((Folder-Pobranych), (Join-Path $env:USERPROFILE 'Downloads')) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
     $start = Get-Date
-    Log '  serwer producenta nie wpuścił programu - pobieram przez przeglądarkę (zapisz plik w Pobranych, program sam go wykryje, czekam do 10 min)...'
+    Log '  otwieram plik w zwykłej przeglądarce - zapisz go w Pobranych, program sam go wykryje (czekam do 10 min)...'
     # explorer.exe otwiera adres w przegladarce zalogowanego uzytkownika (nie na koncie administratora)
     Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $adres + '"')
     $wzor = [IO.Path]::GetFileNameWithoutExtension($nazwa) + '*' + [IO.Path]::GetExtension($nazwa)
@@ -3332,13 +3657,22 @@ function Pobierz-PrzezPrzegladarkeRecznie([string]$adres, [string]$nazwa) {
     $null
 }
 
-function Pobierz-PlikProducenta($p, [string]$folder) {
+function Pobierz-PlikProducenta($p, [string]$folder, [string]$stronaStartowa) {
     $cel = Join-Path $folder (Nazwa-PlikuZAdresu $p.Adres)
     Log ('  pobieram: ' + $p.Nazwa + ' ' + $p.Wersja + ' (' + (Tekst-Rozmiaru $p.Bajty) + ')...')
-    $ok = (Pobierz-Plik $p.Adres $cel '' ('pobieranie ' + $p.Wersja)) -and (Czy-PlikBinarny $cel)
+    $ok = $false
+    if (-not $stan.Blokada.ContainsKey((Host-Adresu $p.Adres))) {
+        $ok = (Pobierz-Plik $p.Adres $cel '' ('pobieranie ' + $p.Wersja)) -and (Czy-PlikBinarny $cel)
+    }
     if (-not $ok) {
         Remove-Item -LiteralPath $cel -Force -ErrorAction SilentlyContinue
-        $cel = Pobierz-PrzezPrzegladarkeRecznie $p.Adres (Split-Path -Leaf $cel)
+        $stan.Blokada[(Host-Adresu $p.Adres)] = $true
+        Log '  serwer nie wpuścił zwykłego pobierania - pobieram przez przeglądarkę.'
+        $cel = Pobierz-PlikPrzezPrzegladarke $p.Adres $folder $stronaStartowa
+        if ($cel -and -not (Czy-PlikBinarny $cel)) { $cel = $null }
+    }
+    if (-not $cel) {
+        $cel = Pobierz-PrzezPrzegladarkeRecznie $p.Adres (Nazwa-PlikuZAdresu $p.Adres)
         if (-not $cel) { throw 'nie udało się pobrać pliku od producenta' }
     }
     $suma = Sprawdz-Sume $cel $p
@@ -3998,7 +4332,7 @@ Dodaj-Kolumne $siatkaD 'Text' 'Zainstalowany sterownik' 200 ''
 Dodaj-Kolumne $siatkaD 'Text' 'Dostępna aktualizacja' 0 ''
 
 $panelD = Nowy-PanelPrzyciskow
-$btnDSzukaj     = Nowy-Przycisk $panelD 'Sprawdź aktualizacje' $true
+$btnDSzukaj     = Nowy-Przycisk $panelD 'Sprawdź aktualizacje (Windows Update i producent)' $true
 $btnDInstaluj   = Nowy-Przycisk $panelD 'Zainstaluj zaznaczone' $false
 $btnDWersja     = Nowy-Przycisk $panelD 'Wybierz wersję...' $false
 $btnDPlikiProducenta = Nowy-Przycisk $panelD 'Szukaj u producenta (BIOS i sterowniki)' $false
@@ -4009,8 +4343,8 @@ $btnDProducent  = Nowy-Przycisk $panelD 'Narzędzie producenta (BIOS)' $false
 $btnDStrona     = Nowy-Przycisk $panelD 'Strona producenta' $false
 $btnDUrzadzenia = Nowy-Przycisk $panelD 'Menedżer urządzeń' $false
 
-$tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update. "Szukaj u producenta" pobiera listę BIOS-ów i sterowników prosto ze strony producenta ' +
-    '(MSI, Gigabyte, ASUS, Lenovo) i sam je instaluje. "Wybierz wersję" (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft - także starsze.') $panelD
+$tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update, a to, czego tam nie ma, od razu sprawdza na stronie producenta płyty lub laptopa ' +
+    '(MSI, Gigabyte, ASUS, Lenovo). "Szukaj u producenta" pobiera i instaluje BIOS i sterowniki od producenta. "Wybierz wersję" (albo dwuklik) - wszystkie wersje z katalogu Microsoft.') $panelD
 
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
@@ -5262,17 +5596,25 @@ $btnDSzukaj.Add_Click({
     try {
         Log 'Pytam Windows Update o nowsze sterowniki i firmware (zwykle 1-3 minuty)...'
         $w = Szukaj-AktualizacjiSterownikow
-        if (-not $w.Ok) {
+        if ($w.Ok) {
+            $lista = @($w.Lista | Where-Object { $_ })
+            Pokaz-AktualizacjeSterownikow $lista
+            $wazne = @($lista | Where-Object { (Rodzaj-Sterownika $_.Klasa)[1] -eq 'Ważne' }).Count
+            $firmware = @($lista | Where-Object { ([string]$_.Klasa).ToUpper() -eq 'FIRMWARE' }).Count
+            Log ('Windows Update: dostępne aktualizacje: ' + $lista.Count + ' (ważne: ' + $wazne + ', BIOS i firmware: ' + $firmware + ').')
+        } else {
             Log ('Windows Update: ' + $w.Blad)
-            Info ('Nie udało się sprawdzić aktualizacji sterowników:' + $NL + $w.Blad)
-            return
         }
-        $lista = @($w.Lista | Where-Object { $_ })
-        Pokaz-AktualizacjeSterownikow $lista
-        $wazne = @($lista | Where-Object { (Rodzaj-Sterownika $_.Klasa)[1] -eq 'Ważne' }).Count
-        $firmware = @($lista | Where-Object { ([string]$_.Klasa).ToUpper() -eq 'FIRMWARE' }).Count
-        Log ('Dostępne aktualizacje: ' + $lista.Count + ' (ważne: ' + $wazne + ', BIOS i firmware: ' + $firmware + ').')
-        if ($lista.Count -eq 0) { Log 'Windows Update nie ma nowszych sterowników. BIOS i sterowniki ze strony producenta: "Szukaj u producenta".' }
+        # to, czego nie ma w Windows Update, sprawdzamy od razu na stronie producenta
+        $wp = Pobierz-WynikProducenta $true 0 $null
+        if (@($wp.Pliki).Count -gt 0) {
+            Pokaz-NowyBiosWSiatce $wp
+            $n = Pokaz-ProducentaWSiatce $wp
+            $nb = @($wp.Pliki | Where-Object { $_.Rodzaj -eq 'BIOS' -and $null -ne $_.Por -and [int]$_.Por -gt 0 -and -not $_.Beta }).Count
+            Log ('Strona ' + $wp.Producent + ': nowszy BIOS: ' + $(if ($nb) { 'tak' } else { 'nie' }) + ', nowsze sterowniki dla urządzeń z listy: ' + $n + '. Pobranie i instalacja: "Szukaj u producenta".')
+        }
+        if (-not $w.Ok) { Info ('Nie udało się sprawdzić Windows Update:' + $NL + $w.Blad) }
+        Posortuj-Ponownie $siatkaD
     } finally {
         Zajety $false
     }
@@ -5623,25 +5965,63 @@ function Pokaz-NowyBiosWSiatce($wynik) {
     }
 }
 
-function Wczytaj-PlikiProducenta([int]$wybrany) {
+function Pokaz-ProducentaWSiatce($wynik) {
+    # sterowniki, ktorych nie ma w Windows Update: co ma dla nich producent plyty / laptopa
+    $pliki = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'Sterownik' })
+    if ($pliki.Count -eq 0) { return 0 }
+    $ile = 0
+    foreach ($r in $siatkaD.Rows) {
+        $s = $r.Tag
+        if ($s.Aktualizacja -or [string]$s.Nazwa -like 'BIOS / UEFI:*' -or -not $s.Wersja) { continue }
+        $kand = @(foreach ($p in $pliki) { if (Dopasuj-Sterownik $p @($s)) { $p } }) | Sort-Object -Property DataSort -Descending | Select-Object -First 1
+        if (-not $kand) {
+            if ([string]$r.Cells[5].Value -like 'brak w Windows Update*') {
+                $r.Cells[5].Value = 'brak nowszego w Windows Update ani na stronie ' + $wynik.Producent
+                $r.Cells[5].Style.ForeColor = Kolor 'OK'
+            }
+            continue
+        }
+        $por = $null
+        try {
+            $va = [version]([string]$kand.Wersja).Trim()
+            $vb = [version]([string]$s.Wersja).Trim()
+            if ($va.Major -eq $vb.Major) { $por = $va.CompareTo($vb) }
+        } catch { }
+        $d = ''
+        if ($kand.Data) { $d = ' (' + ([datetime]$kand.Data).ToString('yyyy-MM-dd') + ')' }
+        $opis = $kand.Nazwa + ' ' + $kand.Wersja + $d
+        if ($null -ne $por -and $por -gt 0) {
+            $r.Cells[5].Value = 'NOWSZY u producenta: ' + $opis
+            $r.Cells[5].Style.ForeColor = Kolor 'UWAGA'
+            $r.Cells[5].Style.Font = $czcionkaGruba
+            $ile++
+        } elseif ($null -ne $por -and $por -eq 0) {
+            $r.Cells[5].Value = 'aktualny (ta sama wersja na stronie ' + $wynik.Producent + ')'
+            $r.Cells[5].Style.ForeColor = Kolor 'OK'
+            $r.Cells[5].Style.Font = $czcionka
+        } else {
+            $r.Cells[5].Value = 'na stronie ' + $wynik.Producent + ': ' + $opis
+            $r.Cells[5].Style.ForeColor = Kolor 'INFO'
+            $r.Cells[5].Style.Font = $czcionka
+        }
+    }
+    $ile
+}
+
+function Wczytaj-PlikiProducenta([int]$wybrany, [bool]$odNowa) {
     $pr = $stan.PR
     $g = $pr.Siatka
     $g.Rows.Clear()
     $pr.Panel.Enabled = $false
     $pr.Gora.Enabled = $false
+    $pr.Naglowek.Controls[1].Text = 'Szukam na stronie producenta...'
     Zajety $true
     try {
         if (-not $pr.Info) { $pr.Info = Info-Komputera }
         $info = $pr.Info
-        $opisModelu = $info.Producent + ' ' + $info.Model
-        if (-not $info.Laptop -and $info.Plyta) { $opisModelu = $info.PlytaProducent + ' ' + $info.Plyta }
-        Log ('Szukam BIOS-u i sterowników u producenta: ' + $opisModelu.Trim() + ' (do minuty)...')
-        $wynik = Szukaj-UProducenta $info $wybrany
+        $wynik = Pobierz-WynikProducenta $odNowa $wybrany $pr.InfoRecznie
         if ($pr.Okno.IsDisposed) { return }
         $pr.Wynik = $wynik
-        $zainstalowane = @(foreach ($r in $siatkaD.Rows) { $r.Tag })
-        if ($zainstalowane.Count -eq 0) { try { $zainstalowane = @(Pobierz-Sterowniki) } catch { } }
-        Oznacz-PlikiProducenta $wynik $zainstalowane
         foreach ($p in $wynik.Pliki) { Dodaj-WierszProducenta $g $p }
         if ($g.Rows.Count -gt 0) { $g.Sort($g.Columns[1], [System.ComponentModel.ListSortDirection]::Ascending) }
 
@@ -5662,13 +6042,8 @@ function Wczytaj-PlikiProducenta([int]$wybrany) {
         $pr.Naglowek.Controls[1].Text = $tytul
         $pr.Naglowek.Controls[0].Text = $opis
         Filtruj-PlikiProducenta
-
-        $ileB = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'BIOS' }).Count
-        $ileS = @($wynik.Pliki | Where-Object { $_.Rodzaj -eq 'Sterownik' }).Count
-        $nowsze = @($wynik.Pliki | Where-Object { $null -ne $_.Por -and [int]$_.Por -gt 0 }).Count
-        Log ($wynik.Producent + ': BIOS-ów: ' + $ileB + ', sterowników: ' + $ileS + ', nowszych niż zainstalowane: ' + $nowsze + '.')
-        if ($wynik.Uwagi) { Log ('  ' + $wynik.Uwagi) }
         Pokaz-NowyBiosWSiatce $wynik
+        [void](Pokaz-ProducentaWSiatce $wynik)
     } finally {
         Zajety $false
         if (-not $pr.Okno.IsDisposed) { $pr.Panel.Enabled = $true; $pr.Gora.Enabled = $true }
@@ -5727,7 +6102,7 @@ function Instaluj-PlikiProducenta([bool]$tylkoPobierz) {
             $p = $r.Tag
             Ustaw-StanWiersza $r 'pobieram...' 'INFO'
             try {
-                $plik = Pobierz-PlikProducenta $p $folder
+                $plik = Pobierz-PlikProducenta $p $folder ([string]$pr.Wynik.Strona)
                 if ($tylkoPobierz) {
                     $cel = Zapisz-WPobranych $plik
                     $zapisane += $cel
@@ -5755,6 +6130,7 @@ function Instaluj-PlikiProducenta([bool]$tylkoPobierz) {
         if ($zapisane.Count -gt 0) { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $zapisane[-1] + '"') }
     } finally {
         # gdy dzialal instalator producenta, pliki zostaja (moze jeszcze z nich korzystac); Czyszczenie usunie je pozniej
+        Zamknij-PrzegladarkeCDP $null
         if ($folder -and -not $stan.Interaktywny) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
         Zajety $false
         if (-not $pr.Okno.IsDisposed) { $pr.Panel.Enabled = $true; $pr.Gora.Enabled = $true }
@@ -5797,6 +6173,7 @@ function Pokaz-PlikiProducenta {
     $bNowsze = Nowy-Przycisk $panel 'Zaznacz nowsze' $false
     $bOdznacz = Nowy-Przycisk $panel 'Odznacz wszystko' $false
     $bStrona = Nowy-Przycisk $panel 'Strona producenta' $false
+    $bModel = Nowy-Przycisk $panel 'Wpisz model...' $false
     $bSzukaj = Nowy-Przycisk $panel 'Szukaj ponownie' $false
     $bZamknij = Nowy-Przycisk $panel 'Zamknij' $false
 
@@ -5806,10 +6183,10 @@ function Pokaz-PlikiProducenta {
     $okno.Controls.Add($panel)
 
     $stan.PR = @{ Okno = $okno; Siatka = $siatka; Panel = $panel; Gora = $gora; Naglowek = $naglowek; Filtr = $filtr; Model = $model
-        ModelEtykieta = $etykietaModelu; Info = $null; Wynik = $null; Laduje = $false; Zainstalowano = $false }
-    $okno.Add_Shown({ Wczytaj-PlikiProducenta 0 })
+        ModelEtykieta = $etykietaModelu; Info = $null; InfoRecznie = $null; Wynik = $null; Laduje = $false; Zainstalowano = $false }
+    $okno.Add_Shown({ Wczytaj-PlikiProducenta 0 $false })
     $filtr.Add_SelectedIndexChanged({ if ($stan.PR.Siatka.Rows.Count -gt 0) { Filtruj-PlikiProducenta } })
-    $model.Add_SelectedIndexChanged({ if (-not $stan.PR.Laduje -and $stan.PR.Model.SelectedIndex -ge 0) { Wczytaj-PlikiProducenta $stan.PR.Model.SelectedIndex } })
+    $model.Add_SelectedIndexChanged({ if (-not $stan.PR.Laduje -and $stan.PR.Model.SelectedIndex -ge 0) { Wczytaj-PlikiProducenta $stan.PR.Model.SelectedIndex $true } })
     $bInstaluj.Add_Click({ Instaluj-PlikiProducenta $false })
     $bPobierz.Add_Click({ Instaluj-PlikiProducenta $true })
     $bNowsze.Add_Click({ Zaznacz-NowszeProducenta })
@@ -5820,7 +6197,23 @@ function Pokaz-PlikiProducenta {
         if (-not $adres) { $adres = (Strona-Producenta).Adres }
         Start-Process -FilePath $adres
     })
-    $bSzukaj.Add_Click({ $stan.PR.Info = $null; Wczytaj-PlikiProducenta $stan.PR.Model.SelectedIndex })
+    $bSzukaj.Add_Click({ $stan.PR.Info = $null; Wczytaj-PlikiProducenta ([math]::Max(0, $stan.PR.Model.SelectedIndex)) $true })
+    $bModel.Add_Click({
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        $i = $stan.PR.InfoRecznie
+        if (-not $i) { $i = $stan.PR.Info }
+        if (-not $i) { $i = Info-Komputera }
+        $obecny = ($i.Plyta -replace '\s*\(MS-[0-9A-Z]+\)', '')
+        if ($i.Laptop) { $obecny = $i.Model }
+        $t = [Microsoft.VisualBasic.Interaction]::InputBox(('Wpisz dokładną nazwę modelu (z naklejki, pudełka albo strony producenta), np.:' + $NL +
+            'B850 GAMING PLUS WIFI,  ROG STRIX B650E-F GAMING WIFI,  B650 AORUS ELITE AX' + $NL + $NL + 'Rozpoznany producent: ' + (Wykryj-Producenta $i)), 'Model komputera', $obecny)
+        if (-not $t -or -not $t.Trim()) { return }
+        $kopia = $i.PSObject.Copy()
+        $kopia.Plyta = $t.Trim()
+        if ($kopia.Laptop) { $kopia.Model = $t.Trim() }
+        $stan.PR.InfoRecznie = $kopia
+        Wczytaj-PlikiProducenta 0 $true
+    })
     $bZamknij.Add_Click({ $stan.PR.Okno.Close() })
     $siatka.Add_CellDoubleClick({
         param($nadawca, $e)
@@ -5836,7 +6229,7 @@ function Pokaz-PlikiProducenta {
         $wynik = $stan.PR.Wynik
         Zajety $true
         try { Wypelnij-Sterowniki } finally { Zajety $false }
-        if ($wynik) { Pokaz-NowyBiosWSiatce $wynik }
+        if ($wynik) { Pokaz-NowyBiosWSiatce $wynik; [void](Pokaz-ProducentaWSiatce $wynik) }
     }
 }
 
