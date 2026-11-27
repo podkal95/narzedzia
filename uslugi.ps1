@@ -14,7 +14,7 @@
       Naprawy            - DISM, SFC, reset Windows Update, sieci, kolejki drukarki, ikon, zegara, sprawdzenie dysku
       Instalacja         - programy przez winget (oficjalne repozytorium Microsoft), wybor wersji, aktualizacja wszystkich
       Sprzet             - dysk (SMART, zuzycie), RAM i wolne sloty, bateria, sterowniki, klucz Windows, czas startu
-      Sterowniki i BIOS  - Windows Update, katalog Microsoft (wybor wersji) i pliki prosto od producenta (MSI, Gigabyte, ASUS, Lenovo)
+      Sterowniki i BIOS  - Windows Update, katalog Microsoft (wybor wersji) i pliki prosto od producenta (MSI, Gigabyte, ASUS, Lenovo, Dell)
       Bezpieczenstwo     - antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta
       Przed reinstalacja - kopia sterownikow, lista programow, klucz, zakladki przegladarek i dane uzytkownika
     Na gorze: Serwis ekspresowy, Raport dla klienta (HTML/PDF), Pomoc zdalna.
@@ -26,7 +26,7 @@
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.5'
+$WersjaNarzedzia = '4.6'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
 $NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
@@ -2766,7 +2766,7 @@ function Info-Komputera {
     [pscustomobject]@{
         Producent = ([string]$cs.Manufacturer).Trim(); Model = ([string]$cs.Model).Trim(); Rodzina = ([string]$pr.Version).Trim()
         Laptop = $laptop; PlytaProducent = ([string]$bb.Manufacturer).Trim(); Plyta = ([string]$bb.Product).Trim(); PlytaWersja = ([string]$bb.Version).Trim()
-        Bios = ([string]$bios.SMBIOSBIOSVersion).Trim(); BiosData = $data; Win11 = ($build -ge 22000)
+        Bios = ([string]$bios.SMBIOSBIOSVersion).Trim(); BiosData = $data; Win11 = ($build -ge 22000); Sku = ([string]$cs.SystemSKUNumber).Trim()
     }
 }
 
@@ -3209,12 +3209,12 @@ function Nowy-PlikProducenta([string]$rodzaj, [string]$kategoria, [string]$nazwa
     if ($data) { $ticks = ([datetime]$data).Ticks }
     [pscustomobject]@{ Rodzaj = $rodzaj; Kategoria = $kategoria; Nazwa = $nazwa; Wersja = $wersja; WersjaPor = $wersja; Data = $data; DataSort = $ticks
         Bajty = $bajty; Adres = $adres; Opis = $opis; Sha256 = ''; Md5 = ''; Beta = $false; InnaLinia = $false; Zainstalowany = ''; Por = $null
-        Lenovo = $null; Waga = ($w * 100000 + (100000 - $dni)) }
+        Lenovo = $null; Dell = ''; Pci = @(); Pasuje = $null; Waga = ($w * 100000 + (100000 - $dni)) }
 }
 
 function Nowy-WynikProducenta([string]$producent, $info) {
     [pscustomobject]@{ Producent = $producent; Model = ''; Strona = ''; Pliki = (New-Object System.Collections.ArrayList); Uwagi = ''
-        Kandydaci = @(); Wybrany = 0; Info = $info; BiosPor = $info.Bios }
+        Kandydaci = @(); Wybrany = 0; Info = $info; BiosPor = $info.Bios; Pci = @{} }
 }
 
 function Normalizuj-Wersje([string]$w) {
@@ -3545,6 +3545,210 @@ function Produkty-Lenovo($info) {
     $w
 }
 
+# ---------- Dell (katalog Dell Command | Update: BIOS, sterowniki, firmware dla numeru SKU) ----------
+function Urzadzenia-PCI {
+    # urzadzenia PCI komputera: VEN:DEV -> nazwa i wersja sterownika
+    $h = @{}
+    try {
+        foreach ($d in @(Get-CimInstance -ClassName Win32_PnPSignedDriver -Filter "DeviceID LIKE 'PCI%'" -ErrorAction Stop)) {
+            $m = [regex]::Match([string]$d.DeviceID, 'VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})', 'IgnoreCase')
+            if (-not $m.Success) { continue }
+            $klucz = ($m.Groups[1].Value + ':' + $m.Groups[2].Value).ToUpper()
+            $h[$klucz] = [pscustomobject]@{ Nazwa = [string]$d.DeviceName; Wersja = [string]$d.DriverVersion; Urzadzenie = [string]$d.DeviceID }
+        }
+    } catch { }
+    $h
+}
+
+function Pobierz-PlikBinarny([string]$adres, [string]$folder, [string]$opis) {
+    # zwykle pobieranie, a gdy serwer nie wpusci - przez przegladarke
+    $hostCelu = Host-Adresu $adres
+    $cel = Join-Path $folder (Nazwa-PlikuZAdresu $adres)
+    if (-not $stan.Blokada.ContainsKey($hostCelu)) {
+        if ((Pobierz-Plik $adres $cel '' $opis) -and (Czy-PlikBinarny $cel)) { return $cel }
+        Remove-Item -LiteralPath $cel -Force -ErrorAction SilentlyContinue
+        $stan.Blokada[$hostCelu] = $true
+        Log ('  ' + $opis + ': serwer nie wpuścił zwykłego pobierania - pobieram przez przeglądarkę.')
+    }
+    $p = Pobierz-PlikPrzezPrzegladarke $adres $folder ''
+    if ($p -and (Czy-PlikBinarny $p)) { return $p }
+    $null
+}
+
+function Czytaj-KatalogDell([string]$adres, [string]$folder, [string]$opis, [string]$sha256) {
+    $cab = Pobierz-PlikBinarny $adres $folder $opis
+    if (-not $cab) { Log ('  ' + $opis + ': nie udało się pobrać.'); return '' }
+    if ($sha256) {
+        try {
+            if ((Get-FileHash -LiteralPath $cab -Algorithm SHA256).Hash -ne $sha256) { Log ('  ' + $opis + ': suma kontrolna się nie zgadza - pomijam.'); return '' }
+        } catch { }
+    }
+    $cel = Join-Path $folder ('katalog_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    New-Item -ItemType Directory -Force -Path $cel | Out-Null
+    [void](Uruchom-Exe (Join-Path $env:windir 'System32\expand.exe') ('-F:* "' + $cab + '" "' + $cel + '"') 'rozpakowywanie katalogu Dell')
+    $xml = Get-ChildItem -LiteralPath $cel -Filter '*.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $xml) { Log ('  ' + $opis + ': w archiwum nie ma katalogu.'); return '' }
+    # katalogi Dell sa w UTF-16 (z BOM) - ReadAllText rozpoznaje to sam
+    [IO.File]::ReadAllText($xml.FullName)
+}
+
+function Atrybuty-Xml([string]$naglowek) {
+    $h = @{}
+    foreach ($m in [regex]::Matches($naglowek, '(\w+)="([^"]*)"')) { $h[$m.Groups[1].Value] = [System.Net.WebUtility]::HtmlDecode($m.Groups[2].Value) }
+    $h
+}
+
+function Tekst-Elementu([string]$xml, [string]$element) {
+    $m = [regex]::Match($xml, '<' + $element + '\b[^>]*>\s*<Display[^>]*>\s*<!\[CDATA\[([\s\S]*?)\]\]>')
+    if ($m.Success) { return $m.Groups[1].Value.Trim() }
+    ''
+}
+
+function Sciezka-KataloguDell([string]$indeks, [string]$sku) {
+    # CatalogIndexPC: kazda grupa ma liste modeli (systemID) i sciezke do katalogu tego modelu
+    foreach ($g in [regex]::Matches($indeks, '<GroupManifest\b[\s\S]*?</GroupManifest>')) {
+        if ($g.Value -notmatch ('systemID="' + [regex]::Escape($sku) + '"')) { continue }
+        $p = [regex]::Match($g.Value, '<ManifestInformation\b[^>]*\bpath="([^"]+)"')
+        if (-not $p.Success) { continue }
+        $h = [regex]::Match($g.Value, '<Hash algorithm="SHA256">([0-9a-fA-F]{64})</Hash>')
+        $sha = ''
+        if ($h.Success) { $sha = $h.Groups[1].Value }
+        return [pscustomobject]@{ Sciezka = $p.Groups[1].Value; Sha256 = $sha }
+    }
+    $null
+}
+
+function Pliki-Dell([string]$xml, [string]$sku, $pci) {
+    $lista = New-Object System.Collections.ArrayList
+    $baza = 'https://downloads.dell.com/'
+    $b = [regex]::Match($xml, '<Manifest\b[^>]*\bbaseLocation="([^"]+)"')
+    if ($b.Success -and $b.Groups[1].Value -match '^(https?://)?([A-Za-z0-9.-]+)/?$') { $baza = 'https://' + $Matches[2] + '/' }
+    $krytycznosc = @{ 'Urgent' = 'pilna'; 'Recommended' = 'zalecana'; 'Optional' = 'opcjonalna' }
+    foreach ($blok in [regex]::Matches($xml, '<SoftwareComponent\b([^>]*)>([\s\S]*?)</SoftwareComponent>')) {
+        $tresc = $blok.Groups[2].Value
+        if ($sku -and $tresc -notmatch ('systemID="' + [regex]::Escape($sku) + '"')) { continue }
+        $atr = Atrybuty-Xml $blok.Groups[1].Value
+        if (-not $atr['path']) { continue }
+        $systemy = @([regex]::Matches($tresc, '<OperatingSystem\b[^>]*>'))
+        if ($systemy.Count -gt 0 -and -not @($systemy | Where-Object { $_.Value -match 'majorVersion="10"' }).Count) { continue }
+        $typ = ''
+        $t = [regex]::Match($tresc, '<ComponentType value="(\w+)"')
+        if ($t.Success) { $typ = $t.Groups[1].Value.ToUpper() }
+        switch ($typ) { 'BIOS' { $rodzaj = 'BIOS' } 'DRVR' { $rodzaj = 'Sterownik' } 'FRMW' { $rodzaj = 'Firmware' } default { $rodzaj = 'Narzędzie' } }
+        $nazwa = Tekst-Elementu $tresc 'Name'
+        $kategoria = Tekst-Elementu $tresc 'Category'
+        $waga = Tekst-Elementu $tresc 'Criticality'
+        if ($krytycznosc.ContainsKey($waga)) { $kategoria = ($kategoria + ' (' + $krytycznosc[$waga] + ')').Trim() }
+        $data = $null
+        if ($atr['dateTime']) { $data = Data-Z $atr['dateTime'] }
+        if (-not $data -and $atr['releaseDate']) {
+            $d = [datetime]::MinValue
+            if ([datetime]::TryParseExact($atr['releaseDate'].Trim(), 'MMMM d, yyyy', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$d)) { $data = $d }
+        }
+        $wersja = [string]$atr['vendorVersion']
+        if (-not $wersja) { $wersja = [string]$atr['dellVersion'] }
+        $adres = $baza + $atr['path'].TrimStart('/')
+        if ($atr['path'] -match '^https?://') { $adres = $atr['path'] }
+        $p = Nowy-PlikProducenta $rodzaj $kategoria $nazwa $wersja $data (Bajty-ZTekstu $atr['size']) $adres (Tekst-ZHtml (Tekst-Elementu $tresc 'Description'))
+        $p.Dell = $typ
+        if ($atr['hashMD5'] -match '^[0-9a-fA-F]{32}$') { $p.Md5 = $atr['hashMD5'] }
+        $sha = [regex]::Match($tresc, '<Hash algorithm="SHA256">([0-9a-fA-F]{64})</Hash>')
+        if ($sha.Success) { $p.Sha256 = $sha.Groups[1].Value }
+        $p.Pci = @(foreach ($u in [regex]::Matches($tresc, '<PCIInfo\b[^>]*>')) {
+            $a = Atrybuty-Xml $u.Value
+            if ($a['vendorID'] -and $a['deviceID']) { ($a['vendorID'].PadLeft(4, '0') + ':' + $a['deviceID'].PadLeft(4, '0')).ToUpper() }
+        })
+        if ($p.Pci.Count -gt 0) {
+            $p.Pasuje = (@($p.Pci | Where-Object { $pci.ContainsKey($_) }).Count -gt 0)
+            if (-not $p.Pasuje) { $p.Nazwa = $p.Nazwa + '   (dla innego wyposażenia - nie ma takiego urządzenia w tym komputerze)' }
+        }
+        [void]$lista.Add($p)
+    }
+    $lista
+}
+
+function Produkty-Dell($info) {
+    $w = Nowy-WynikProducenta 'Dell' $info
+    $w.Model = (($info.Model + ' (SKU ' + $info.Sku + ')').Trim())
+    try { $w.Strona = (Strona-Producenta).Adres } catch { $w.Strona = 'https://www.dell.com/support/home/' }
+    $sku = $info.Sku
+    if (-not $sku) { $w.Uwagi = 'BIOS nie podaje numeru SKU komputera - użyj Dell Command | Update (przycisk "Narzędzie producenta").'; return $w }
+    $folder = Folder-Roboczy
+    try {
+        $xml = ''
+        $indeks = Czytaj-KatalogDell 'https://downloads.dell.com/catalog/CatalogIndexPC.cab' $folder 'Dell: spis katalogów' ''
+        if ($indeks) {
+            $k = Sciezka-KataloguDell $indeks $sku
+            if ($k) { $xml = Czytaj-KatalogDell ('https://downloads.dell.com/' + $k.Sciezka.TrimStart('/')) $folder ('Dell: katalog modelu ' + $sku) $k.Sha256 }
+            else { Log ('  Dell: w spisie nie ma modelu ' + $sku + ' - sprawdzam pełny katalog.') }
+        }
+        if (-not $xml) {
+            Log '  Dell: pobieram pełny katalog Dell (kilka MB, chwilę potrwa)...'
+            $xml = Czytaj-KatalogDell 'https://downloads.dell.com/catalog/CatalogPC.cab' $folder 'Dell: pełny katalog' ''
+        }
+        if (-not $xml) { $w.Uwagi = 'Nie udało się pobrać katalogu Dell (szczegóły w dzienniku).'; return $w }
+        $w.Pci = Urzadzenia-PCI
+        foreach ($p in (Pliki-Dell $xml $sku $w.Pci)) { [void]$w.Pliki.Add($p) }
+        if ($w.Pliki.Count -eq 0) { $w.Uwagi = 'Katalog Dell nie ma plików dla tego modelu (SKU ' + $sku + ') - użyj Dell SupportAssist albo strony producenta.' }
+    } finally {
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $w
+}
+
+function Zawies-BitLocker {
+    # po aktualizacji BIOS-u BitLocker zapytalby o klucz odzyskiwania - wstrzymujemy go na jedno uruchomienie
+    try {
+        $v = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+        if ([string]$v.ProtectionStatus -eq 'On') {
+            Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 1 -ErrorAction Stop | Out-Null
+            Log '  BitLocker wstrzymany do następnego uruchomienia (inaczej po aktualizacji BIOS-u zapytałby o klucz odzyskiwania).'
+        }
+    } catch { }
+}
+
+function Na-Baterii {
+    try { return [bool](@(Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop | Where-Object { [int]$_.BatteryStatus -eq 1 }).Count) } catch { return $false }
+}
+
+function Zainstaluj-PakietDell($p, [string]$plik, [string]$folder) {
+    $log = Join-Path $folder ('dell_' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.log')
+    $arg = '/s /l="' + $log + '"'
+    $bios = ($p.Rodzaj -eq 'BIOS')
+    if ($bios) {
+        if ((Na-Baterii) -and -not (Pytanie ('Laptop działa na baterii. Aktualizacja BIOS-u wymaga zasilacza (i baterii powyżej 10%).' + $NL + 'Podłącz zasilacz i kliknij Tak.'))) {
+            return (Wynik-Instalacji $false $false 'anulowano - brak zasilacza')
+        }
+        Zawies-BitLocker
+        if ($null -ne $p.Por -and [int]$p.Por -lt 0) { $arg = $arg + ' /f' }
+        Log '  instaluję BIOS Dell po cichu - sam BIOS wgra się przy ponownym uruchomieniu komputera...'
+    } else {
+        Log ('  instaluję po cichu: ' + $p.Nazwa + '...')
+    }
+    $kod = Uruchom-Exe $plik $arg ('instalacja: ' + $p.Nazwa)
+    if ($kod -eq 7 -and $bios) {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        $haslo = [Microsoft.VisualBasic.Interaction]::InputBox('BIOS tego komputera ma hasło administratora (setup). Wpisz je, żeby zaktualizować BIOS - puste pole = anuluj.', 'Hasło BIOS-u', '')
+        if ($haslo) { $kod = Uruchom-Exe $plik ($arg + ' /p="' + $haslo + '"') ('instalacja: ' + $p.Nazwa) }
+    }
+    switch ($kod) {
+        0 {
+            if ($bios) { return (Wynik-Instalacji $true $true 'BIOS przygotowany - wgra się przy ponownym uruchomieniu') }
+            return (Wynik-Instalacji $true $false 'zainstalowano (pakiet Dell, po cichu)')
+        }
+        2 {
+            if ($bios) { return (Wynik-Instalacji $true $true 'BIOS przygotowany - wgra się przy ponownym uruchomieniu') }
+            return (Wynik-Instalacji $true $true 'zainstalowano - wymaga ponownego uruchomienia')
+        }
+        6 { return (Wynik-Instalacji $true $true 'komputer uruchamia się ponownie') }
+        3 { return (Wynik-Instalacji $false $false 'ta sama albo nowsza wersja jest już zainstalowana') }
+        5 { return (Wynik-Instalacji $false $false 'pakiet nie pasuje do tego komputera (brak urządzenia albo wymaganej wersji)') }
+        7 { return (Wynik-Instalacji $false $false 'potrzebne poprawne hasło BIOS-u') }
+        10 { return (Wynik-Instalacji $false $false 'BIOS odmówił - zwykle za słaba bateria albo brak zasilacza') }
+    }
+    Wynik-Instalacji $false $false ('pakiet Dell zakończył się kodem ' + $kod + ' (log: ' + $log + ')')
+}
+
 # ---------- inni producenci ----------
 function Produkty-Inne($info, [string]$producent) {
     $w = Nowy-WynikProducenta $producent $info
@@ -3568,6 +3772,7 @@ function Szukaj-UProducenta($info, [int]$wybrany) {
         'Gigabyte' { return (Produkty-Gigabyte $info $wybrany) }
         'ASUS'     { return (Produkty-ASUS $info) }
         'Lenovo'   { return (Produkty-Lenovo $info) }
+        'Dell'     { return (Produkty-Dell $info) }
     }
     if (-not $producent) { $producent = $info.Producent }
     Produkty-Inne $info $producent
@@ -3611,6 +3816,17 @@ function Pobierz-WynikProducenta([bool]$odNowa, [int]$wybrany, $info) {
 
 # ---------- porownanie z tym, co jest zainstalowane ----------
 function Dopasuj-Sterownik($p, $zainstalowane) {
+    if (@($p.Pci).Count -gt 0) {
+        foreach ($s in @($zainstalowane)) {
+            if ($null -eq $s) { continue }
+            $id = ([string]$s.Urzadzenie + ' ' + [string]$s.Sprzet).ToUpper()
+            foreach ($k in $p.Pci) {
+                $c = $k -split ':'
+                if ($id -match ('VEN_' + $c[0] + '&DEV_' + $c[1])) { return $s }
+            }
+        }
+        return $null
+    }
     $tekst = ($p.Kategoria + ' ' + $p.Nazwa).ToUpper()
     $rodzaje = @()
     if ($tekst -match 'AUDIO|SOUND') { $rodzaje += 'Dźwięk' }
@@ -3648,6 +3864,17 @@ function Oznacz-PlikiProducenta($wynik, $zainstalowane) {
             $p.Zainstalowany = $wynik.Info.Bios
             $p.Por = Porownaj-ZZainstalowana $p $wynik.BiosPor $wynik.Info.BiosData
             if ($p.InnaLinia) { $p.Por = $null }
+            continue
+        }
+        if ($p.Rodzaj -ne 'Sterownik' -and $p.Rodzaj -ne 'Firmware') { continue }
+        if (@($p.Pci).Count -gt 0) {
+            # pakiet ma identyfikatory urzadzen (Dell) - porownujemy z urzadzeniem, ktore naprawde jest w komputerze
+            $u = @($p.Pci | ForEach-Object { $wynik.Pci[$_] } | Where-Object { $_ }) | Select-Object -First 1
+            if (-not $u) { $p.Por = $null; continue }
+            $p.Zainstalowany = $u.Wersja
+            $va = $null; $vb = $null
+            try { $va = [version]([string]$p.Wersja).Trim(); $vb = [version]([string]$u.Wersja).Trim() } catch { }
+            if ($va -and $vb -and $va.Major -eq $vb.Major) { $p.Por = $va.CompareTo($vb) }
             continue
         }
         if ($p.Rodzaj -ne 'Sterownik') { continue }
@@ -3733,6 +3960,7 @@ function Pobierz-PrzezPrzegladarkeRecznie([string]$adres, [string]$nazwa) {
 }
 
 function Pobierz-PlikProducenta($p, [string]$folder, [string]$stronaStartowa) {
+    if ($p.Dell) { $stronaStartowa = '' }
     $cel = Join-Path $folder (Nazwa-PlikuZAdresu $p.Adres)
     Log ('  pobieram: ' + $p.Nazwa + ' ' + $p.Wersja + ' (' + (Tekst-Rozmiaru $p.Bajty) + ')...')
     $ok = $false
@@ -4016,6 +4244,7 @@ function Przygotuj-Bios($p, [string]$plik, [string]$rozpakowane, $wynik) {
 
 function Zainstaluj-PlikProducenta($p, [string]$plik, [string]$folder, $wynik) {
     if ($p.Lenovo) { return (Zainstaluj-PakietLenovo $p $plik $folder) }
+    if ($p.Dell) { return (Zainstaluj-PakietDell $p $plik $folder) }
     $rozpakowane = $null
     if (Czy-Archiwum $plik) {
         $rozpakowane = Join-Path $folder ('pliki_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
@@ -4722,7 +4951,7 @@ $btnDStrona     = Nowy-Przycisk $panelD 'Strona producenta' $false
 $btnDUrzadzenia = Nowy-Przycisk $panelD 'Menedżer urządzeń' $false
 
 $tabSterowniki = Nowa-Zakladka 'Sterowniki i BIOS' $siatkaD ('"Sprawdź aktualizacje" pyta Windows Update, a to, czego tam nie ma, od razu sprawdza na stronie producenta płyty lub laptopa ' +
-    '(MSI, Gigabyte, ASUS, Lenovo). "Szukaj u producenta" pobiera i instaluje BIOS i sterowniki od producenta. "Wybierz wersję" (albo dwuklik) - wszystkie wersje z katalogu Microsoft.') $panelD
+    '(MSI, Gigabyte, ASUS, Lenovo, Dell). "Szukaj u producenta" pobiera i instaluje BIOS i sterowniki od producenta. "Wybierz wersję" (albo dwuklik) - wszystkie wersje z katalogu Microsoft.') $panelD
 
 # ---------- Bezpieczenstwo ----------
 $siatkaB = Nowa-Siatka
@@ -4744,41 +4973,41 @@ $tabBezp = Nowa-Zakladka 'Bezpieczeństwo' $siatkaB ('Przegląd zabezpieczeń ko
     '"Raport dla klienta" tworzy na pulpicie stronę z wynikami, wykonanymi pracami i zaleceniami - do wydruku albo zapisania jako PDF.') $panelB
 
 # ---------- Poczta Outlook ----------
-$siatkaP = Nowa-Siatka
-Dodaj-Kolumne $siatkaP 'Text' 'Adres e-mail' 250 ''
-Dodaj-Kolumne $siatkaP 'Text' 'Typ konta' 150 ''
-Dodaj-Kolumne $siatkaP 'Text' 'Serwer przychodzący' 240 ''
-Dodaj-Kolumne $siatkaP 'Text' 'Serwer wychodzący' 240 ''
-Dodaj-Kolumne $siatkaP 'Text' 'Profil Outlooka' 0 ''
+$siatkaM = Nowa-Siatka
+Dodaj-Kolumne $siatkaM 'Text' 'Adres e-mail' 250 ''
+Dodaj-Kolumne $siatkaM 'Text' 'Typ konta' 150 ''
+Dodaj-Kolumne $siatkaM 'Text' 'Serwer przychodzący' 240 ''
+Dodaj-Kolumne $siatkaM 'Text' 'Serwer wychodzący' 240 ''
+Dodaj-Kolumne $siatkaM 'Text' 'Profil Outlooka' 0 ''
 
-$panelP = Nowy-PanelPrzyciskow
-[void](Nowa-Etykieta $panelP 'Adres e-mail:' 4)
-$txtPEmail = Nowe-Pole $panelP 250 '' $false
-[void](Nowa-Etykieta $panelP 'Hasło:' 8)
-$txtPHaslo = Nowe-Pole $panelP 170 '' $true
-$chkPPokaz = Nowe-Pole-Wyboru $panelP 'pokaż' $false 0
-[void](Nowa-Etykieta $panelP 'Nazwa nadawcy:' 8)
-$txtPNazwa = Nowe-Pole $panelP 190 '' $false
-$panelP.SetFlowBreak($txtPNazwa, $true)
-[void](Nowa-Etykieta $panelP 'POP3:' 4)
-$txtPPop3 = Nowe-Pole $panelP 200 $PocztaPop3 $false
-[void](Nowa-Etykieta $panelP 'port' 0)
-$txtPPortPop3 = Nowe-Pole $panelP 48 ([string]$PocztaPortPop3) $false
-[void](Nowa-Etykieta $panelP 'SMTP:' 8)
-$txtPSmtp = Nowe-Pole $panelP 200 $PocztaSmtp $false
-[void](Nowa-Etykieta $panelP 'port' 0)
-$txtPPortSmtp = Nowe-Pole $panelP 48 ([string]$PocztaPortSmtp) $false
-[void](Nowa-Etykieta $panelP 'Login (gdy inny niż adres):' 8)
-$txtPLogin = Nowe-Pole $panelP 150 '' $false
-$chkPZostaw = Nowe-Pole-Wyboru $panelP 'Zostaw kopię na serwerze 14 dni' $true 8
-$panelP.SetFlowBreak($chkPZostaw, $true)
-$btnPDodaj    = Nowy-Przycisk $panelP 'Dodaj konto POP3 do Outlooka' $true
-$btnPSprawdz  = Nowy-Przycisk $panelP 'Sprawdź login i hasło' $false
-$btnPPanel    = Nowy-Przycisk $panelP 'Otwórz Pocztę (Panel sterowania)' $false
-$btnPOdswiez  = Nowy-Przycisk $panelP 'Odśwież listę kont' $false
+$panelM = Nowy-PanelPrzyciskow
+[void](Nowa-Etykieta $panelM 'Adres e-mail:' 4)
+$txtMEmail = Nowe-Pole $panelM 250 '' $false
+[void](Nowa-Etykieta $panelM 'Hasło:' 8)
+$txtMHaslo = Nowe-Pole $panelM 170 '' $true
+$chkMPokaz = Nowe-Pole-Wyboru $panelM 'pokaż' $false 0
+[void](Nowa-Etykieta $panelM 'Nazwa nadawcy:' 8)
+$txtMNazwa = Nowe-Pole $panelM 190 '' $false
+$panelM.SetFlowBreak($txtMNazwa, $true)
+[void](Nowa-Etykieta $panelM 'POP3:' 4)
+$txtMPop3 = Nowe-Pole $panelM 200 $PocztaPop3 $false
+[void](Nowa-Etykieta $panelM 'port' 0)
+$txtMPortPop3 = Nowe-Pole $panelM 48 ([string]$PocztaPortPop3) $false
+[void](Nowa-Etykieta $panelM 'SMTP:' 8)
+$txtMSmtp = Nowe-Pole $panelM 200 $PocztaSmtp $false
+[void](Nowa-Etykieta $panelM 'port' 0)
+$txtMPortSmtp = Nowe-Pole $panelM 48 ([string]$PocztaPortSmtp) $false
+[void](Nowa-Etykieta $panelM 'Login (gdy inny niż adres):' 8)
+$txtMLogin = Nowe-Pole $panelM 150 '' $false
+$chkMZostaw = Nowe-Pole-Wyboru $panelM 'Zostaw kopię na serwerze 14 dni' $true 8
+$panelM.SetFlowBreak($chkMZostaw, $true)
+$btnMDodaj    = Nowy-Przycisk $panelM 'Dodaj konto POP3 do Outlooka' $true
+$btnMSprawdz  = Nowy-Przycisk $panelM 'Sprawdź login i hasło' $false
+$btnMPanel    = Nowy-Przycisk $panelM 'Otwórz Pocztę (Panel sterowania)' $false
+$btnMOdswiez  = Nowy-Przycisk $panelM 'Odśwież listę kont' $false
 
-$tabPoczta = Nowa-Zakladka 'Poczta Outlook' $siatkaP ('Konto POP3 w klasycznym Outlooku bez klikania w kreatorze: wpisz adres e-mail i hasło, serwery, porty i SSL są już ustawione. ' +
-    'Program sprawdza login na serwerze i dodaje konto w Outlooku osoby przy komputerze. Lista pokazuje konta, które już są w Outlooku.') $panelP
+$tabPoczta = Nowa-Zakladka 'Poczta Outlook' $siatkaM ('Konto POP3 w klasycznym Outlooku bez klikania w kreatorze: wpisz adres e-mail i hasło, serwery, porty i SSL są już ustawione. ' +
+    'Program sprawdza login na serwerze i dodaje konto w Outlooku osoby przy komputerze. Lista pokazuje konta, które już są w Outlooku.') $panelM
 
 # ---------- Przed reinstalacja ----------
 $siatkaK = Nowa-Siatka
@@ -6351,9 +6580,9 @@ function Filtruj-PlikiProducenta {
         $p = $r.Tag
         $widoczny = $true
         switch ($tryb) {
-            0 { $widoczny = ($p.Rodzaj -ne 'Narzędzie') }
+            0 { $widoczny = ($p.Rodzaj -ne 'Narzędzie' -and $p.Pasuje -ne $false) }
             1 { $widoczny = ($p.Rodzaj -eq 'BIOS') }
-            2 { $widoczny = ($p.Rodzaj -eq 'Sterownik' -or $p.Rodzaj -eq 'Firmware') }
+            2 { $widoczny = (($p.Rodzaj -eq 'Sterownik' -or $p.Rodzaj -eq 'Firmware') -and $p.Pasuje -ne $false) }
             3 { $widoczny = ($null -ne $p.Por -and [int]$p.Por -gt 0) }
         }
         $r.Visible = $widoczny
@@ -6551,7 +6780,12 @@ function Instaluj-PlikiProducenta([bool]$tylkoPobierz) {
         Zajety $false
         if (-not $pr.Okno.IsDisposed) { $pr.Panel.Enabled = $true; $pr.Gora.Enabled = $true }
     }
-    if ($restart) { Info 'Uruchom ponownie komputer, żeby dokończyć instalację.' }
+    if ($restart -and -not $tylkoPobierz) {
+        if (Pytanie ('Żeby dokończyć instalację (np. wgrać BIOS), trzeba uruchomić komputer ponownie.' + $NL + 'Zapisz otwarte pliki. Uruchomić ponownie teraz?')) {
+            Log 'Ponowne uruchomienie za 30 sekund (anulowanie: shutdown /a).'
+            [void](Uruchom-Program 'shutdown.exe /r /t 30' 'ponowne uruchomienie')
+        }
+    }
 }
 
 function Pokaz-PlikiProducenta {
@@ -6958,11 +7192,11 @@ $zegarSchowka.Add_Tick({
 })
 
 function Wypelnij-KontaPoczty {
-    $siatkaP.Rows.Clear()
+    $siatkaM.Rows.Clear()
     $konta = @(Konta-Outlooka)
     foreach ($k in $konta) {
-        $idx = $siatkaP.Rows.Add($k.Email, $k.Typ, $k.Przychodzacy, $k.Wychodzacy, ($k.Profil + '   (Outlook ' + $k.Wersja + ')'))
-        $w = $siatkaP.Rows[$idx]
+        $idx = $siatkaM.Rows.Add($k.Email, $k.Typ, $k.Przychodzacy, $k.Wychodzacy, ($k.Profil + '   (Outlook ' + $k.Wersja + ')'))
+        $w = $siatkaM.Rows[$idx]
         $w.Tag = $k
         $w.Cells[0].Style.Font = $czcionkaGruba
     }
@@ -6981,21 +7215,21 @@ function Nazwa-ZAdresu([string]$email) {
 }
 
 function Dane-KontaPoczty {
-    $email = $txtPEmail.Text.Trim()
-    if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Info 'Wpisz poprawny adres e-mail.'; $txtPEmail.Focus() | Out-Null; return $null }
-    if (-not $txtPHaslo.Text) { Info 'Wpisz hasło do skrzynki.'; $txtPHaslo.Focus() | Out-Null; return $null }
+    $email = $txtMEmail.Text.Trim()
+    if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Info 'Wpisz poprawny adres e-mail.'; $txtMEmail.Focus() | Out-Null; return $null }
+    if (-not $txtMHaslo.Text) { Info 'Wpisz hasło do skrzynki.'; $txtMHaslo.Focus() | Out-Null; return $null }
     $portPop = 0; $portSmtp = 0
-    if (-not [int]::TryParse($txtPPortPop3.Text.Trim(), [ref]$portPop) -or $portPop -lt 1 -or $portPop -gt 65535) { Info 'Niepoprawny port POP3.'; return $null }
-    if (-not [int]::TryParse($txtPPortSmtp.Text.Trim(), [ref]$portSmtp) -or $portSmtp -lt 1 -or $portSmtp -gt 65535) { Info 'Niepoprawny port SMTP.'; return $null }
-    if (-not $txtPPop3.Text.Trim() -or -not $txtPSmtp.Text.Trim()) { Info 'Wpisz serwery POP3 i SMTP.'; return $null }
-    $login = $txtPLogin.Text.Trim()
+    if (-not [int]::TryParse($txtMPortPop3.Text.Trim(), [ref]$portPop) -or $portPop -lt 1 -or $portPop -gt 65535) { Info 'Niepoprawny port POP3.'; return $null }
+    if (-not [int]::TryParse($txtMPortSmtp.Text.Trim(), [ref]$portSmtp) -or $portSmtp -lt 1 -or $portSmtp -gt 65535) { Info 'Niepoprawny port SMTP.'; return $null }
+    if (-not $txtMPop3.Text.Trim() -or -not $txtMSmtp.Text.Trim()) { Info 'Wpisz serwery POP3 i SMTP.'; return $null }
+    $login = $txtMLogin.Text.Trim()
     if (-not $login) { $login = $email }
-    $nazwa = $txtPNazwa.Text.Trim()
+    $nazwa = $txtMNazwa.Text.Trim()
     if (-not $nazwa) { $nazwa = Nazwa-ZAdresu $email }
     $dni = 0
-    if ($chkPZostaw.Checked) { $dni = 14 }
-    [pscustomobject]@{ Email = $email; Login = $login; Haslo = $txtPHaslo.Text; Nazwa = $nazwa; Pop3 = $txtPPop3.Text.Trim(); PortPop3 = $portPop
-        Smtp = $txtPSmtp.Text.Trim(); PortSmtp = $portSmtp; ZostawDni = $dni; Profil = ''; Pst = '' }
+    if ($chkMZostaw.Checked) { $dni = 14 }
+    [pscustomobject]@{ Email = $email; Login = $login; Haslo = $txtMHaslo.Text; Nazwa = $nazwa; Pop3 = $txtMPop3.Text.Trim(); PortPop3 = $portPop
+        Smtp = $txtMSmtp.Text.Trim(); PortSmtp = $portSmtp; ZostawDni = $dni; Profil = ''; Pst = '' }
 }
 
 function Sciezka-PstKlienta([string]$email) {
@@ -7074,7 +7308,7 @@ function Dodaj-KontoPoczty {
             if ($wSchowku) { $t = $t + ' - jest już w schowku: kliknij w pole hasła, wciśnij Ctrl+V i zaznacz "Zapisz to hasło". Schowek wyczyści się sam za 3 minuty.' }
             else { $t = $t + ' - wpisz je i zaznacz "Zapisz to hasło".' }
             Info $t
-            $txtPHaslo.Text = ''
+            $txtMHaslo.Text = ''
         } else {
             Log '  Outlook nie potwierdził dodania konta w ciągu 2 minut.'
             Info ('Outlook nie potwierdził dodania konta - sprawdź jego okno (może o coś pyta).' + $NL + $NL +
@@ -7086,10 +7320,10 @@ function Dodaj-KontoPoczty {
     }
 }
 
-$chkPPokaz.Add_CheckedChanged({ $txtPHaslo.UseSystemPasswordChar = -not $chkPPokaz.Checked })
-$btnPOdswiez.Add_Click({ Wypelnij-KontaPoczty })
-$btnPDodaj.Add_Click({ Dodaj-KontoPoczty })
-$btnPSprawdz.Add_Click({
+$chkMPokaz.Add_CheckedChanged({ $txtMHaslo.UseSystemPasswordChar = -not $chkMPokaz.Checked })
+$btnMOdswiez.Add_Click({ Wypelnij-KontaPoczty })
+$btnMDodaj.Add_Click({ Dodaj-KontoPoczty })
+$btnMSprawdz.Add_Click({
     $k = Dane-KontaPoczty
     if (-not $k) { return }
     Zajety $true
@@ -7102,7 +7336,7 @@ $btnPSprawdz.Add_Click({
         Zajety $false
     }
 })
-$btnPPanel.Add_Click({
+$btnMPanel.Add_Click({
     $o = Sciezka-Outlooka
     $cpl = 'mlcfg32.cpl'
     if ($o) {
@@ -7112,9 +7346,9 @@ $btnPPanel.Add_Click({
     $control = Join-Path $env:windir 'System32\control.exe'
     if (-not (Uruchom-JakoKlient $control ('"' + $cpl + '"'))) { Start-Process -FilePath $control -ArgumentList ('"' + $cpl + '"') }
 })
-$siatkaP.Add_CellDoubleClick({
+$siatkaM.Add_CellDoubleClick({
     param($nadawca, $e)
-    if ($e.RowIndex -ge 0) { $txtPEmail.Text = [string]$siatkaP.Rows[$e.RowIndex].Tag.Email; $txtPHaslo.Focus() | Out-Null }
+    if ($e.RowIndex -ge 0) { $txtMEmail.Text = [string]$siatkaM.Rows[$e.RowIndex].Tag.Email; $txtMHaslo.Focus() | Out-Null }
 })
 
 # =====================================================================

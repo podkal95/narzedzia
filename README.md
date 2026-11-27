@@ -25,6 +25,7 @@ $TrybPodgladu=1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/u
 Poprzednie wersje, gdyby nowa sprawiała kłopoty (uruchom z PowerShella jako administrator):
 
 ```powershell
+irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-45/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-441/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-44/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-43/uslugi.ps1 | iex
@@ -61,11 +62,12 @@ irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | i
   - Przy ręcznym dodawaniu konta (Panel sterowania > Poczta) wystarczy potem adres i hasło. Lista pokazuje konta, które już są w Outlooku.
 - **Sprzęt:** dyski (zdrowie, zużycie SSD, temperatura, HDD jako systemowy), RAM i wolne sloty, bateria, karta graficzna, urządzenia bez sterowników, aktywacja, klucz Windows z BIOS, czas uruchamiania.
 - **Sterowniki i BIOS:** zainstalowane sterowniki podzespołów (karta graficzna, sieć, dźwięk, chipset...) i wersja BIOS. „Sprawdź aktualizacje” pyta Windows Update o nowsze sterowniki i firmware, a to, czego tam nie ma, od razu sprawdza na stronie producenta. Przy każdym urządzeniu pisze, czy producent ma nowszy sterownik lub BIOS. Zaznaczone aktualizacje z Windows Update instaluje. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft Update i instaluje wybraną, także starszą.
-  - **„Szukaj u producenta”** (albo dwuklik na wierszu BIOS) sam rozpoznaje płytę lub laptopa i pobiera listę BIOS-ów i sterowników prosto z serwera producenta: **MSI, Gigabyte, ASUS, Lenovo**. Pokazuje wersje, daty, rozmiary i to, co jest nowsze od zainstalowanego (także wersje beta i starsze). Gdy model nie zostanie rozpoznany, można go wpisać („Wpisz model...”).
+  - **„Szukaj u producenta”** (albo dwuklik na wierszu BIOS) sam rozpoznaje płytę lub laptopa i pobiera listę BIOS-ów i sterowników prosto z serwera producenta: **MSI, Gigabyte, ASUS, Lenovo, Dell**. Pokazuje wersje, daty, rozmiary i to, co jest nowsze od zainstalowanego (także wersje beta i starsze). Gdy model nie zostanie rozpoznany, można go wpisać („Wpisz model...”).
   - MSI i Gigabyte nie wpuszczają zwykłych programów. Wtedy program otwiera ich stronę w przeglądarce Edge bez okna (a gdy to nie wystarczy, w oknie schowanym poza ekranem) i stamtąd pobiera listę i pliki, tak jak zrobiłby to człowiek. Dziennik na dole pokazuje każdą próbę.
   - Zaznaczone pliki pobiera, sprawdza sumę kontrolną podaną przez producenta i rozpakowuje (gdy trzeba, sam doinstaluje darmowego 7-Zip). Sterowniki instaluje po cichu (pnputil) albo instalatorem producenta. Pakiety Lenovo instaluje tak jak Lenovo System Update.
   - BIOS płyt głównych (MSI, Gigabyte, ASUS) kopiuje na pendrive i może od razu uruchomić komputer ponownie prosto do BIOS-u. Dalej zostaje M-Flash, Q-Flash albo EZ Flash, z instrukcją w okienku. Laptopy: uruchamia program producenta do aktualizacji BIOS-u.
-  - „Tylko pobierz” zapisuje pliki w folderze Pobrane klienta. Dell i HP: „Narzędzie producenta” instaluje i uruchamia Dell Command Update albo HP Support Assistant (jest też Lenovo System Update i Intel DSA).
+  - **Dell** (stacjonarki i laptopy): program bierze katalog Dell dla dokładnego modelu (numer SKU z BIOS-u, ten sam, z którego korzysta Dell Command | Update). Sterowniki dopasowuje po identyfikatorach urządzeń, więc pokazuje te, które pasują do sprzętu w tym komputerze. Pakiety Dell instaluje po cichu. BIOS przygotowuje do wgrania przy ponownym uruchomieniu: wstrzymuje BitLocker na jeden restart, pilnuje zasilacza i w razie potrzeby pyta o hasło BIOS-u.
+  - „Tylko pobierz” zapisuje pliki w folderze Pobrane klienta. HP: „Narzędzie producenta” instaluje i uruchamia HP Support Assistant (jest też Dell Command Update, Lenovo System Update i Intel DSA).
 - **Bezpieczeństwo:** antywirus, zapora, aktualizacje, UAC, RDP, SMBv1, Secure Boot, TPM, BitLocker, konta. Do tego szybkie naprawy.
 - **Przed reinstalacją:** kopia sterowników, listy programów, informacji o komputerze z kluczem Windows, zakładek przeglądarek i danych użytkownika (Pulpit, Dokumenty, Obrazy, Pobrane, Muzyka, Wideo, także z OneDrive) wybranego konta na pendrive.
 
