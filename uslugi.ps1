@@ -26,7 +26,7 @@
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.4'
+$WersjaNarzedzia = '4.4.1'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
 $NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
@@ -48,9 +48,55 @@ if (-not $czyAdmin -and -not $trybPodgladu) {
             "try { irm '$AdresSkryptu' | iex } catch { Add-Type -AssemblyName System.Windows.Forms; " +
             "[void][System.Windows.Forms.MessageBox]::Show('Nie udalo sie uruchomic narzedzia: ' + `$_.Exception.Message, 'Narzedzia serwisowe') }`""
     }
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $polecenie
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -WorkingDirectory $env:windir -ArgumentList $polecenie
     return
 }
+
+# ---------- krotkie nazwy folderow (8.3, np. C:\Users\A8B91~1.RAD) ----------
+# Konta domenowe czesto maja TEMP zapisany krotka nazwa, a PowerShell 5.1 sie na niej wywraca
+# ("An object at the specified path ... does not exist"). Zamieniamy na pelne nazwy na czas pracy programu.
+function Pelna-Sciezka([string]$sciezka) {
+    if (-not $sciezka -or $sciezka -notmatch '~') { return $sciezka }
+    try {
+        if (-not ('SerwisSKL.Sciezki' -as [type])) {
+            Add-Type -Namespace 'SerwisSKL' -Name 'Sciezki' -ErrorAction Stop -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferSize);
+'@
+        }
+        $typ = 'SerwisSKL.Sciezki' -as [type]
+        $bufor = New-Object System.Text.StringBuilder 1024
+        $n = $typ::GetLongPathName($sciezka, $bufor, 1024)
+        if ($n -gt 0 -and $n -lt 1024) { return $bufor.ToString() }
+    } catch { }
+    $sciezka
+}
+
+function Napraw-KrotkieSciezki {
+    foreach ($zmienna in @('TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA')) {
+        $w = [Environment]::GetEnvironmentVariable($zmienna)
+        $d = Pelna-Sciezka $w
+        if ($d -and $d -ne $w) { [Environment]::SetEnvironmentVariable($zmienna, $d) }
+    }
+    foreach ($zmienna in @('TEMP', 'TMP')) {
+        # gdy pelnej nazwy nie da sie ustalic: Temp z AppData albo Temp Windows
+        $w = [Environment]::GetEnvironmentVariable($zmienna)
+        if ($w -and $w -notmatch '~') { continue }
+        $zapas = ''
+        if ($env:LOCALAPPDATA -and $env:LOCALAPPDATA -notmatch '~') { $zapas = Join-Path $env:LOCALAPPDATA 'Temp' }
+        if (-not $zapas -or -not (Test-Path -LiteralPath $zapas)) { $zapas = Join-Path $env:windir 'Temp' }
+        [Environment]::SetEnvironmentVariable($zmienna, $zapas)
+    }
+    try {
+        $tu = (Get-Location).ProviderPath
+        if ((Get-Location).Provider.Name -ne 'FileSystem' -or $tu -match '~') {
+            $d = Pelna-Sciezka $tu
+            if (-not $d -or $d -match '~' -or -not (Test-Path -LiteralPath $d)) { $d = $env:windir }
+            Set-Location -LiteralPath $d
+            [Environment]::CurrentDirectory = $d
+        }
+    } catch { }
+}
+Napraw-KrotkieSciezki
 
 # ---------- osobna aplikacja na pasku zadan (wlasna ikona) i ostry obraz na ekranach HiDPI ----------
 $win32 = $null
@@ -6584,6 +6630,18 @@ if ($win32) {
         }
     } catch { }
 }
+
+# blad w dowolnym przycisku nie wywraca programu - trafia do dziennika i okienka
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($nadawca, $zdarzenie)
+    try {
+        $blad = $zdarzenie.Exception
+        if ($blad -is [System.Management.Automation.RuntimeException] -and $blad.InnerException) { $blad = $blad.InnerException }
+        Log ('BŁĄD: ' + $blad.Message)
+        [void][System.Windows.Forms.MessageBox]::Show(('Wystąpił błąd - program działa dalej:' + $NL + $NL + $blad.Message + $NL + $NL +
+            'Szczegóły są w dzienniku (' + $plikLogu + ').'), 'Narzędzia serwisowe', 'OK', 'Warning')
+    } catch { }
+})
 
 try {
     [void]$form.ShowDialog()
