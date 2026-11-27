@@ -25,6 +25,7 @@ $TrybPodgladu=1; irm https://raw.githubusercontent.com/podkal95/narzedzia/main/u
 Poprzednie wersje, gdyby nowa sprawiała kłopoty (uruchom z PowerShella jako administrator):
 
 ```powershell
+irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-441/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-44/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-43/uslugi.ps1 | iex
 irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-42/uslugi.ps1 | iex
@@ -54,6 +55,10 @@ irm https://raw.githubusercontent.com/podkal95/narzedzia/wersja-3/uslugi.ps1 | i
 - **Czyszczenie:** pliki tymczasowe, cache aktualizacji, kosz, przeglądarki, DISM. Pokazuje, ile miejsca zwolniono. Okno **Największe foldery** pokazuje, co zajmuje miejsce.
 - **Naprawy:** DISM, SFC, reset Windows Update, reset sieci, kolejka drukarki, ikony i miniatury, Eksplorator, zegar, sprawdzenie dysku, plany zasilania, Sklep.
 - **Instalacja:** ponad 30 programów przez winget (oficjalne repozytorium Microsoft), pakiety („Podstawowy zestaw”, „Biuro”, „Gracz”, „Diagnostyka”) i aktualizacja wszystkich programów. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje programu z repozytorium i instaluje wybraną, także starszą (z opcją odinstalowania obecnej).
+- **Poczta Outlook:** konto POP3 w klasycznym Outlooku bez klikania w kreatorze. Wpisujesz adres e-mail i hasło, a serwery, porty, SSL i uwierzytelnianie SMTP są już ustawione (domyślne serwery są na początku pliku `uslugi.ps1`: `$PocztaPop3`, `$PocztaSmtp`).
+  - Program sprawdza login i hasło na serwerze, zamyka Outlooka i dodaje konto do domyślnego profilu osoby przy komputerze (albo tworzy profil z plikiem danych). Wcześniej robi kopię ustawień Outlooka.
+  - Outlook zapyta o hasło przy pierwszym odbieraniu poczty: hasło jest wtedy w schowku (Ctrl+V), a schowek czyści się sam po 3 minutach.
+  - Przy ręcznym dodawaniu konta (Panel sterowania > Poczta) wystarczy potem adres i hasło. Lista pokazuje konta, które już są w Outlooku.
 - **Sprzęt:** dyski (zdrowie, zużycie SSD, temperatura, HDD jako systemowy), RAM i wolne sloty, bateria, karta graficzna, urządzenia bez sterowników, aktywacja, klucz Windows z BIOS, czas uruchamiania.
 - **Sterowniki i BIOS:** zainstalowane sterowniki podzespołów (karta graficzna, sieć, dźwięk, chipset...) i wersja BIOS. „Sprawdź aktualizacje” pyta Windows Update o nowsze sterowniki i firmware, a to, czego tam nie ma, od razu sprawdza na stronie producenta. Przy każdym urządzeniu pisze, czy producent ma nowszy sterownik lub BIOS. Zaznaczone aktualizacje z Windows Update instaluje. **„Wybierz wersję”** (albo dwuklik) pokazuje wszystkie wersje sterownika z katalogu Microsoft Update i instaluje wybraną, także starszą.
   - **„Szukaj u producenta”** (albo dwuklik na wierszu BIOS) sam rozpoznaje płytę lub laptopa i pobiera listę BIOS-ów i sterowników prosto z serwera producenta: **MSI, Gigabyte, ASUS, Lenovo**. Pokazuje wersje, daty, rozmiary i to, co jest nowsze od zainstalowanego (także wersje beta i starsze). Gdy model nie zostanie rozpoznany, można go wpisać („Wpisz model...”).

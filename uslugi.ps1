@@ -26,13 +26,19 @@
 #>
 
 $AdresSkryptu = 'https://raw.githubusercontent.com/podkal95/narzedzia/main/uslugi.ps1'
-$WersjaNarzedzia = '4.4.1'
+$WersjaNarzedzia = '4.5'
 
 # ---------- dane serwisu (baner i raport dla klienta) ----------
 $NazwaSerwisu   = ''    # nazwa firmy pokazywana w programie i raporcie; puste = bez nazwy
 $TelefonSerwisu = ''    # numer pokazywany klientowi, np. '600 100 200'
 $LinkOpinii     = ''    # link "Poproś o opinie" z wizytówki Google
 $QrOpinii       = ''    # kod QR (SVG) z linku do opinii
+
+# ---------- poczta: serwery wpisane z gory w zakladce "Poczta Outlook" ----------
+$PocztaPop3      = 'pop3-jarexs.ogicom.pl'
+$PocztaPortPop3  = 995    # 995 = SSL, 110 = bez SSL
+$PocztaSmtp      = 'smtp-jarexs.ogicom.pl'
+$PocztaPortSmtp  = 465    # 465 = SSL, 587 = TLS
 
 # ---------- uprawnienia ----------
 $czyAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -142,7 +148,7 @@ $stan = @{
     KluczWindows = ''; CzasStartu = $null; PunktUtworzony = $false; Winget = $null; ZainstalowaneWinget = @()
     FolderKopiiDanych = ''; OstatniaKopia = ''; NF = $null; Zajety = 0
     Ja = ''; Klient = $null; InneKonto = $false; Profile = @(); ProfilKopii = $null; Menu = (New-Object System.Collections.ArrayList)
-    WS = $null; PR = $null; WersjeWinget = @{}; Blokada = @{}; Interaktywny = $false; CDP = $null; TrybPrzegladarki = ''; WynikProducenta = $null
+    WS = $null; PR = $null; WersjeWinget = @{}; Blokada = @{}; Interaktywny = $false; CDP = $null; TrybPrzegladarki = ''; WynikProducenta = $null; HasloWSchowku = ''
 }
 
 # ---------- kolory ----------
@@ -558,6 +564,28 @@ function Nowa-Etykieta($panel, [string]$tekst, [int]$lewyOdstep) {
     $l.Margin = New-Object System.Windows.Forms.Padding((Px $lewyOdstep), (Px 11), (Px 2), 0)
     [void]$panel.Controls.Add($l)
     $l
+}
+
+function Nowe-Pole($panel, [int]$szerokosc, [string]$tekst, [bool]$haslo) {
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Width = Px $szerokosc
+    $t.Text = $tekst
+    $t.BorderStyle = 'FixedSingle'
+    $t.Margin = New-Object System.Windows.Forms.Padding((Px 2), (Px 7), (Px 8), 0)
+    if ($haslo) { $t.UseSystemPasswordChar = $true }
+    [void]$panel.Controls.Add($t)
+    $t
+}
+
+function Nowe-Pole-Wyboru($panel, [string]$tekst, [bool]$zaznaczone, [int]$lewyOdstep) {
+    $c = New-Object System.Windows.Forms.CheckBox
+    $c.Text = $tekst
+    $c.AutoSize = $true
+    $c.Checked = $zaznaczone
+    $c.ForeColor = $kolorTekst
+    $c.Margin = New-Object System.Windows.Forms.Padding((Px $lewyOdstep), (Px 9), (Px 6), 0)
+    [void]$panel.Controls.Add($c)
+    $c
 }
 
 function Nowa-Lista($panel, [int]$szerokosc, [string[]]$pozycje) {
@@ -2541,6 +2569,7 @@ $naglowkiPrac = [ordered]@{
     'Naprawy'        = 'Naprawy systemu'
     'Sterowniki'     = 'Zaktualizowane sterowniki i firmware'
     'Instalacja'     = 'Programy zainstalowane i zaktualizowane'
+    'Poczta'         = 'Poczta e-mail (Outlook)'
     'Bezpieczeństwo' = 'Zabezpieczenia'
     'Kopia'          = 'Kopia zapasowa przed reinstalacją'
 }
@@ -4059,6 +4088,309 @@ function Wybierz-ZListy([string]$tytul, [string]$tekst, [string[]]$pozycje, [int
 }
 
 # =====================================================================
+#  POCZTA OUTLOOK: KONTO POP3 (klasyczny Outlook)
+# =====================================================================
+# Konto powstaje z pliku profilu (PRF), ktory Outlook importuje na koncie klienta:
+# serwery, porty, SSL i uwierzytelnianie SMTP sa ustawione z gory - wpisuje sie tylko adres i haslo.
+# Dodatkowo Outlook dostaje lokalny plik autokonfiguracji dla domeny (przy recznym dodawaniu
+# konta w Panelu sterowania wystarczy wtedy adres i haslo).
+
+function Sciezka-Outlooka {
+    foreach ($klucz in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\OUTLOOK.EXE', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\OUTLOOK.EXE')) {
+        try {
+            $p = [string](Get-Item -LiteralPath $klucz -ErrorAction Stop).GetValue('')
+            $p = $p.Trim('"')
+            if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+        } catch { }
+    }
+    foreach ($baza in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $baza) { continue }
+        foreach ($w in @('Microsoft Office\root\Office16\OUTLOOK.EXE', 'Microsoft Office\Office16\OUTLOOK.EXE', 'Microsoft Office\root\Office15\OUTLOOK.EXE', 'Microsoft Office\Office15\OUTLOOK.EXE')) {
+            $p = Join-Path $baza $w
+            if (Test-Path -LiteralPath $p) { return $p }
+        }
+    }
+    $null
+}
+
+function Wersja-Outlooka([string]$sciezka) {
+    if ($sciezka -match 'Office15') { return '15.0' }
+    '16.0'
+}
+
+function Tekst-ZBin($v) {
+    if ($null -eq $v) { return '' }
+    if ($v -is [byte[]]) { return ([System.Text.Encoding]::Unicode.GetString($v)).TrimEnd([char]0) }
+    [string]$v
+}
+
+function Konta-Outlooka {
+    # konta e-mail we wszystkich profilach Outlooka konta klienta
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($wersja in @('16.0', '15.0')) {
+        $baza = Mapuj-Klucz ('HKCU:\Software\Microsoft\Office\' + $wersja + '\Outlook\Profiles')
+        if (-not (Test-Path -LiteralPath $baza)) { continue }
+        foreach ($profil in @(Get-ChildItem -LiteralPath $baza -ErrorAction SilentlyContinue)) {
+            $konta = Join-Path $profil.PSPath '9375CFF0413111d3B88A00104B2A6676'
+            foreach ($k in @(Get-ChildItem -LiteralPath $konta -ErrorAction SilentlyContinue)) {
+                $w = $k.GetValue('Account Name')
+                if ($null -eq $w) { continue }
+                $pop = Tekst-ZBin $k.GetValue('POP3 Server')
+                $imap = Tekst-ZBin $k.GetValue('IMAP Server')
+                $typ = 'Exchange / Microsoft 365'
+                $przych = ''
+                if ($pop) { $typ = 'POP3'; $przych = $pop + ':' + [string]$k.GetValue('POP3 Port') }
+                elseif ($imap) { $typ = 'IMAP'; $przych = $imap + ':' + [string]$k.GetValue('IMAP Port') }
+                $smtp = Tekst-ZBin $k.GetValue('SMTP Server')
+                if ($smtp) { $smtp = $smtp + ':' + [string]$k.GetValue('SMTP Port') }
+                $email = Tekst-ZBin $k.GetValue('Email')
+                if (-not $email) { $email = Tekst-ZBin $w }
+                [void]$lista.Add([pscustomobject]@{ Wersja = $wersja; Profil = $profil.PSChildName; Konto = (Tekst-ZBin $w); Email = $email; Typ = $typ
+                    Przychodzacy = $przych.TrimEnd(':'); Wychodzacy = $smtp.TrimEnd(':') })
+            }
+        }
+    }
+    $lista
+}
+
+function Profile-Outlooka([string]$wersja) {
+    $baza = Mapuj-Klucz ('HKCU:\Software\Microsoft\Office\' + $wersja + '\Outlook\Profiles')
+    $nazwy = @()
+    if (Test-Path -LiteralPath $baza) { $nazwy = @(Get-ChildItem -LiteralPath $baza -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName }) }
+    $domyslny = [string](Czytaj-Rejestr ('HKCU:\Software\Microsoft\Office\' + $wersja + '\Outlook') 'DefaultProfile')
+    if (-not $domyslny -or $nazwy -notcontains $domyslny) { $domyslny = ($nazwy | Select-Object -First 1) }
+    [pscustomobject]@{ Nazwy = $nazwy; Domyslny = [string]$domyslny }
+}
+
+function Profil-MaMagazyn([string]$wersja, [string]$profil) {
+    # czy w profilu jest juz plik danych (PST) albo skrzynka (OST) - tam trafi poczta POP3
+    $klucz = Join-Path (Mapuj-Klucz ('HKCU:\Software\Microsoft\Office\' + $wersja + '\Outlook\Profiles')) $profil
+    foreach ($k in @(Get-ChildItem -LiteralPath $klucz -ErrorAction SilentlyContinue)) {
+        foreach ($n in @('001f6700', '001e6700', '001f6610', '001e6610')) { if ($null -ne $k.GetValue($n)) { return $true } }
+    }
+    $false
+}
+
+function Zabezpieczenie-Polaczenia([int]$port, [string]$rodzaj) {
+    # POP3: 995 = SSL; SMTP: 465 = SSL, 587 = TLS (STARTTLS)
+    if ($rodzaj -eq 'POP3') { if ($port -eq 995) { return 1 } ; return 0 }
+    if ($port -eq 465) { return 1 }
+    if ($port -eq 587) { return 2 }
+    0
+}
+
+function Tekst-Prf($k) {
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add('; Konto POP3 - Narzedzia serwisowe')
+    $l.Add('[General]')
+    $l.Add('Custom=1')
+    $l.Add('ProfileName=' + $k.Profil)
+    $l.Add('DefaultProfile=Yes')
+    $l.Add('OverwriteProfile=Append')
+    $l.Add('ModifyDefaultProfileIfPresent=TRUE')
+    $l.Add('BackupProfile=No')
+    if ($k.Pst) { $l.Add('DefaultStore=Service1') }
+    $l.Add('')
+    $l.Add('[Service List]')
+    if ($k.Pst) { $l.Add('Service1=Unicode Personal Folders') }
+    $l.Add('')
+    $l.Add('[Internet Account List]')
+    $l.Add('Account1=I_Mail')
+    $l.Add('')
+    if ($k.Pst) {
+        $l.Add('[Service1]')
+        $l.Add('UniqueService=No')
+        $l.Add('Name=' + $k.Email)
+        $l.Add('PathToPersonalFolders=' + $k.Pst)
+        $l.Add('EncryptionType=0x40000000')
+        $l.Add('')
+    }
+    $zostaw = '0x0'
+    if ($k.ZostawDni -gt 0) { $zostaw = '0x' + ([int]$k.ZostawDni * 65536 + 3).ToString('X') }
+    $l.Add('[Account1]')
+    $l.Add('UniqueService=No')
+    $l.Add('AccountName=' + $k.Email)
+    $l.Add('POP3Server=' + $k.Pop3)
+    $l.Add('SMTPServer=' + $k.Smtp)
+    $l.Add('POP3UserName=' + $k.Login)
+    $l.Add('EmailAddress=' + $k.Email)
+    $l.Add('POP3UseSPA=0')
+    $l.Add('DisplayName=' + $k.Nazwa)
+    $l.Add('ReplyEMailAddress=')
+    $l.Add('SMTPUseAuth=1')
+    $l.Add('SMTPAuthMethod=0')
+    $l.Add('SMTPUserName=')
+    $l.Add('SMTPUseSPA=0')
+    $l.Add('ConnectionType=0')
+    $l.Add('ConnectionOID=MyConnection')
+    $l.Add('POP3Port=' + [int]$k.PortPop3)
+    $l.Add('POP3UseSSL=' + (Zabezpieczenie-Polaczenia ([int]$k.PortPop3) 'POP3'))
+    $l.Add('ServerTimeOut=60')
+    $l.Add('SMTPPort=' + [int]$k.PortSmtp)
+    $l.Add('SMTPSecureConnection=' + (Zabezpieczenie-Polaczenia ([int]$k.PortSmtp) 'SMTP'))
+    $l.Add('LeaveOnServer=' + $zostaw)
+    $l.Add('')
+    # sekcje mapowania (stale, wymagane przez Outlooka)
+    foreach ($t in @('[Unicode Personal Folders]', 'ServiceName=MSUPST MS', 'Name=PT_UNICODE,0x3001', 'PathToPersonalFolders=PT_STRING8,0x6700',
+            'RememberPassword=PT_BOOLEAN,0x6701', 'EncryptionType=PT_LONG,0x6702', 'Password=PT_STRING8,0x6703', '',
+            '[I_Mail]', 'AccountType=POP3', 'AccountName=PT_UNICODE,0x0002', 'DisplayName=PT_UNICODE,0x000B', 'EmailAddress=PT_UNICODE,0x000C',
+            'POP3Server=PT_UNICODE,0x0100', 'POP3UserName=PT_UNICODE,0x0101', 'POP3UseSPA=PT_LONG,0x0108', 'Organization=PT_UNICODE,0x0107',
+            'ReplyEmailAddress=PT_UNICODE,0x0103', 'POP3Port=PT_LONG,0x0104', 'POP3UseSSL=PT_LONG,0x0105', 'SMTPServer=PT_UNICODE,0x0200',
+            'SMTPUseAuth=PT_LONG,0x0203', 'SMTPAuthMethod=PT_LONG,0x0208', 'SMTPUserName=PT_UNICODE,0x0204', 'SMTPUseSPA=PT_LONG,0x0207',
+            'ConnectionType=PT_LONG,0x000F', 'ConnectionOID=PT_UNICODE,0x0010', 'SMTPPort=PT_LONG,0x0201', 'SMTPSecureConnection=PT_LONG,0x020A',
+            'ServerTimeOut=PT_LONG,0x0209', 'LeaveOnServer=PT_LONG,0x1000')) { $l.Add($t) }
+    ($l -join "`r`n") + "`r`n"
+}
+
+function Tekst-Autokonfiguracji($k) {
+    $sslPop = 'off'
+    if ((Zabezpieczenie-Polaczenia ([int]$k.PortPop3) 'POP3') -gt 0) { $sslPop = 'on' }
+    $sslSmtp = 'off'
+    if ((Zabezpieczenie-Polaczenia ([int]$k.PortSmtp) 'SMTP') -gt 0) { $sslSmtp = 'on' }
+    $x = '<?xml version="1.0" encoding="utf-8"?>' + "`r`n" +
+        '<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">' + "`r`n" +
+        '  <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">' + "`r`n" +
+        '    <Account>' + "`r`n" +
+        '      <AccountType>email</AccountType>' + "`r`n" +
+        '      <Action>settings</Action>' + "`r`n" +
+        '      <Protocol>' + "`r`n" +
+        '        <Type>POP3</Type>' + "`r`n" +
+        '        <Server>' + (Html $k.Pop3) + '</Server>' + "`r`n" +
+        '        <Port>' + [int]$k.PortPop3 + '</Port>' + "`r`n" +
+        '        <DomainRequired>off</DomainRequired>' + "`r`n" +
+        '        <SPA>off</SPA>' + "`r`n" +
+        '        <SSL>' + $sslPop + '</SSL>' + "`r`n" +
+        '        <AuthRequired>on</AuthRequired>' + "`r`n" +
+        '      </Protocol>' + "`r`n" +
+        '      <Protocol>' + "`r`n" +
+        '        <Type>SMTP</Type>' + "`r`n" +
+        '        <Server>' + (Html $k.Smtp) + '</Server>' + "`r`n" +
+        '        <Port>' + [int]$k.PortSmtp + '</Port>' + "`r`n" +
+        '        <DomainRequired>off</DomainRequired>' + "`r`n" +
+        '        <SPA>off</SPA>' + "`r`n" +
+        '        <SSL>' + $sslSmtp + '</SSL>' + "`r`n" +
+        '        <AuthRequired>on</AuthRequired>' + "`r`n" +
+        '        <UsePOPAuth>on</UsePOPAuth>' + "`r`n" +
+        '      </Protocol>' + "`r`n" +
+        '    </Account>' + "`r`n" +
+        '  </Response>' + "`r`n" +
+        '</Autodiscover>' + "`r`n"
+    $x
+}
+
+function Folder-Poczty {
+    $f = Join-Path $folderKopii 'poczta'
+    if (-not (Test-Path -LiteralPath $f)) { New-Item -ItemType Directory -Force -Path $f | Out-Null }
+    $f
+}
+
+function Ustaw-Autokonfiguracje($k, [string]$wersja) {
+    # plik autokonfiguracji dla domeny adresu; Outlook bierze go zamiast szukac w internecie
+    $domena = ($k.Email -split '@')[-1].ToLower()
+    $plik = Join-Path (Folder-Poczty) ('autokonfiguracja_' + $domena + '.xml')
+    [IO.File]::WriteAllText($plik, (Tekst-Autokonfiguracji $k), (New-Object System.Text.UTF8Encoding($false)))
+    $klucz = 'HKCU:\Software\Microsoft\Office\' + $wersja + '\Outlook\AutoDiscover'
+    Ustaw-Rejestr $klucz $domena $plik 'String'
+    Ustaw-Rejestr $klucz 'PreferLocalXML' 1 'DWord'
+    $plik
+}
+
+function Sprawdz-LoginPop3([string]$serwer, [int]$port, [string]$login, [string]$haslo) {
+    # logowanie do serwera POP3 tak jak zrobi to Outlook (USER / PASS); nic nie jest pobierane ani kasowane
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    try {
+        $proba = $tcp.BeginConnect($serwer, $port, $null, $null)
+        $koniec = (Get-Date).AddSeconds(15)
+        while (-not $proba.AsyncWaitHandle.WaitOne(100)) {
+            Odswiez-Okno
+            if ((Get-Date) -gt $koniec) { return [pscustomobject]@{ Ok = $false; Opis = 'serwer ' + $serwer + ':' + $port + ' nie odpowiada' } }
+        }
+        $tcp.EndConnect($proba)
+        $strumien = $tcp.GetStream()
+        $strumien.ReadTimeout = 15000
+        $strumien.WriteTimeout = 15000
+        if ((Zabezpieczenie-Polaczenia $port 'POP3') -gt 0) {
+            $ssl = New-Object System.Net.Security.SslStream($strumien, $false)
+            $ssl.AuthenticateAsClient($serwer, $null, [System.Security.Authentication.SslProtocols]3072, $false)
+            $strumien = $ssl
+        }
+        $czytnik = New-Object System.IO.StreamReader($strumien, [System.Text.Encoding]::ASCII)
+        $pisarz = New-Object System.IO.StreamWriter($strumien, (New-Object System.Text.UTF8Encoding($false)))
+        $pisarz.NewLine = "`r`n"
+        $pisarz.AutoFlush = $true
+        $powitanie = [string]$czytnik.ReadLine()
+        if ($powitanie -notlike '+OK*') { return [pscustomobject]@{ Ok = $false; Opis = 'nieoczekiwana odpowiedź serwera: ' + $powitanie } }
+        $pisarz.WriteLine('USER ' + $login)
+        $r1 = [string]$czytnik.ReadLine()
+        if ($r1 -notlike '+OK*') { return [pscustomobject]@{ Ok = $false; Opis = 'serwer nie przyjął loginu: ' + $r1 } }
+        $pisarz.WriteLine('PASS ' + $haslo)
+        $r2 = [string]$czytnik.ReadLine()
+        try { $pisarz.WriteLine('QUIT') } catch { }
+        if ($r2 -like '+OK*') { return [pscustomobject]@{ Ok = $true; Opis = 'login i hasło poprawne' } }
+        [pscustomobject]@{ Ok = $false; Opis = 'serwer odrzucił login lub hasło: ' + $r2 }
+    } catch {
+        $b = $_.Exception
+        while ($b.InnerException) { $b = $b.InnerException }
+        [pscustomobject]@{ Ok = $false; Opis = 'błąd połączenia: ' + $b.Message }
+    } finally {
+        try { $tcp.Close() } catch { }
+    }
+}
+
+function Uruchom-JakoKlient([string]$plik, [string]$argumenty) {
+    # program uruchamiany na koncie i w sesji osoby przy komputerze, bez uprawnien administratora
+    # (Outlook zapisuje konto w profilu tego konta)
+    Usun-StareZadania
+    $konto = [string]$stan.Klient.Nazwa
+    if (-not $konto -or -not $stan.InneKonto) { $konto = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+    $nazwa = 'NarzedziaSerwisowe_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    try {
+        $akcja = New-ScheduledTaskAction -Execute $plik -Argument $argumenty
+        $kto = New-ScheduledTaskPrincipal -UserId $konto -LogonType Interactive -RunLevel Limited
+        $opcje = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 12)
+        Register-ScheduledTask -TaskName $nazwa -Action $akcja -Principal $kto -Settings $opcje -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $nazwa -ErrorAction Stop
+        return $true
+    } catch {
+        Log ('  nie udało się uruchomić na koncie ' + $konto + ': ' + $_.Exception.Message)
+        try { Unregister-ScheduledTask -TaskName $nazwa -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+        return $false
+    }
+}
+
+function Usun-StareZadania {
+    try {
+        Get-ScheduledTask -TaskName 'NarzedziaSerwisowe_*' -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.State -ne 'Running' } |
+            ForEach-Object { Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue }
+    } catch { }
+}
+
+function Zamknij-Outlooka {
+    $procesy = @(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue)
+    if ($procesy.Count -eq 0) { return $true }
+    if (-not (Pytanie ('Outlook jest otwarty. Trzeba go zamknąć, żeby dodać konto.' + $NL + 'Zamknąć Outlooka teraz?'))) { return $false }
+    foreach ($p in $procesy) { try { [void]$p.CloseMainWindow() } catch { } }
+    $koniec = (Get-Date).AddSeconds(25)
+    while ((Get-Date) -lt $koniec -and @(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue).Count) { Czekaj 500 }
+    if (@(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue).Count) {
+        if (-not (Pytanie 'Outlook nie zamknął się sam (może czeka na odpowiedź w swoim oknie). Zamknąć go na siłę?')) { return $false }
+        Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Czekaj 1500
+    }
+    $true
+}
+
+function Kopia-ProfiliOutlooka([string]$wersja) {
+    $klucz = 'HKCU\Software\Microsoft\Office\' + $wersja + '\Outlook\Profiles'
+    if ($stan.InneKonto -and $stan.Klient -and $stan.Klient.Zaladowany) { $klucz = 'HKU\' + $stan.Klient.Sid + '\Software\Microsoft\Office\' + $wersja + '\Outlook\Profiles' }
+    $plik = Join-Path (Folder-Poczty) ('kopia_profili_outlooka_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.reg')
+    $w = Uruchom-Program ('reg.exe export "' + $klucz + '" "' + $plik + '" /y') 'kopia profili Outlooka'
+    if ($w.Kod -eq 0) { return $plik }
+    ''
+}
+
+# =====================================================================
 #  OKNO
 # =====================================================================
 $infoOS = ''
@@ -4411,6 +4743,43 @@ $btnBUpdate     = Nowy-Przycisk $panelB 'Windows Update' $false
 $tabBezp = Nowa-Zakladka 'Bezpieczeństwo' $siatkaB ('Przegląd zabezpieczeń komputera. Zielone = OK, pomarańczowe = warto poprawić, czerwone = do naprawy, niebieskie = informacja. ' +
     '"Raport dla klienta" tworzy na pulpicie stronę z wynikami, wykonanymi pracami i zaleceniami - do wydruku albo zapisania jako PDF.') $panelB
 
+# ---------- Poczta Outlook ----------
+$siatkaP = Nowa-Siatka
+Dodaj-Kolumne $siatkaP 'Text' 'Adres e-mail' 250 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Typ konta' 150 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Serwer przychodzący' 240 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Serwer wychodzący' 240 ''
+Dodaj-Kolumne $siatkaP 'Text' 'Profil Outlooka' 0 ''
+
+$panelP = Nowy-PanelPrzyciskow
+[void](Nowa-Etykieta $panelP 'Adres e-mail:' 4)
+$txtPEmail = Nowe-Pole $panelP 250 '' $false
+[void](Nowa-Etykieta $panelP 'Hasło:' 8)
+$txtPHaslo = Nowe-Pole $panelP 170 '' $true
+$chkPPokaz = Nowe-Pole-Wyboru $panelP 'pokaż' $false 0
+[void](Nowa-Etykieta $panelP 'Nazwa nadawcy:' 8)
+$txtPNazwa = Nowe-Pole $panelP 190 '' $false
+$panelP.SetFlowBreak($txtPNazwa, $true)
+[void](Nowa-Etykieta $panelP 'POP3:' 4)
+$txtPPop3 = Nowe-Pole $panelP 200 $PocztaPop3 $false
+[void](Nowa-Etykieta $panelP 'port' 0)
+$txtPPortPop3 = Nowe-Pole $panelP 48 ([string]$PocztaPortPop3) $false
+[void](Nowa-Etykieta $panelP 'SMTP:' 8)
+$txtPSmtp = Nowe-Pole $panelP 200 $PocztaSmtp $false
+[void](Nowa-Etykieta $panelP 'port' 0)
+$txtPPortSmtp = Nowe-Pole $panelP 48 ([string]$PocztaPortSmtp) $false
+[void](Nowa-Etykieta $panelP 'Login (gdy inny niż adres):' 8)
+$txtPLogin = Nowe-Pole $panelP 150 '' $false
+$chkPZostaw = Nowe-Pole-Wyboru $panelP 'Zostaw kopię na serwerze 14 dni' $true 8
+$panelP.SetFlowBreak($chkPZostaw, $true)
+$btnPDodaj    = Nowy-Przycisk $panelP 'Dodaj konto POP3 do Outlooka' $true
+$btnPSprawdz  = Nowy-Przycisk $panelP 'Sprawdź login i hasło' $false
+$btnPPanel    = Nowy-Przycisk $panelP 'Otwórz Pocztę (Panel sterowania)' $false
+$btnPOdswiez  = Nowy-Przycisk $panelP 'Odśwież listę kont' $false
+
+$tabPoczta = Nowa-Zakladka 'Poczta Outlook' $siatkaP ('Konto POP3 w klasycznym Outlooku bez klikania w kreatorze: wpisz adres e-mail i hasło, serwery, porty i SSL są już ustawione. ' +
+    'Program sprawdza login na serwerze i dodaje konto w Outlooku osoby przy komputerze. Lista pokazuje konta, które już są w Outlooku.') $panelP
+
 # ---------- Przed reinstalacja ----------
 $siatkaK = Nowa-Siatka
 Dodaj-Kolumne $siatkaK 'Check' 'Wybierz' 64 ''
@@ -4527,6 +4896,7 @@ Nowa-SekcjaMenu 'PORZĄDKI I NAPRAWY'
 Nowa-PozycjaMenu 0xE74D 'Czyszczenie' $tabCzyszczenie
 Nowa-PozycjaMenu 0xE90F 'Naprawy' $tabNaprawy
 Nowa-PozycjaMenu 0xE896 'Instalacja programów' $tabInstalacja
+Nowa-PozycjaMenu 0xE715 'Poczta Outlook' $tabPoczta
 Nowa-SekcjaMenu 'DIAGNOZA'
 Nowa-PozycjaMenu 0xE7F8 'Sprzęt' $tabSprzet
 Nowa-PozycjaMenu 0xE772 'Sterowniki i BIOS' $tabSterowniki
@@ -6574,6 +6944,180 @@ $btnRaport.Add_Click({ Zapisz-Raport })
 $btnPomoc.Add_Click({ Uruchom-PomocZdalna })
 
 # =====================================================================
+#  POCZTA OUTLOOK - logika zakladki
+# =====================================================================
+$zegarSchowka = New-Object System.Windows.Forms.Timer
+$zegarSchowka.Interval = 180000
+$zegarSchowka.Add_Tick({
+    # haslo nie zostaje w schowku na stale
+    $zegarSchowka.Stop()
+    try {
+        if ($stan.HasloWSchowku -and [System.Windows.Forms.Clipboard]::GetText() -eq $stan.HasloWSchowku) { [System.Windows.Forms.Clipboard]::Clear() }
+    } catch { }
+    $stan.HasloWSchowku = ''
+})
+
+function Wypelnij-KontaPoczty {
+    $siatkaP.Rows.Clear()
+    $konta = @(Konta-Outlooka)
+    foreach ($k in $konta) {
+        $idx = $siatkaP.Rows.Add($k.Email, $k.Typ, $k.Przychodzacy, $k.Wychodzacy, ($k.Profil + '   (Outlook ' + $k.Wersja + ')'))
+        $w = $siatkaP.Rows[$idx]
+        $w.Tag = $k
+        $w.Cells[0].Style.Font = $czcionkaGruba
+    }
+    if (-not (Sciezka-Outlooka)) { Log 'Poczta: nie znaleziono klasycznego Outlooka (Microsoft Office) na tym komputerze.' }
+    elseif ($konta.Count -eq 0) { Log 'Poczta: w Outlooku tego konta nie ma jeszcze żadnej skrzynki.' }
+    if ([string](Czytaj-Rejestr 'HKCU:\Software\Microsoft\Office\16.0\Outlook\Preferences' 'UseNewOutlook') -eq '1') {
+        Log 'Poczta: włączony jest nowy Outlook - konto POP3 trafi do klasycznego (przełącznik "Nowy Outlook" w prawym górnym rogu Outlooka).'
+    }
+    Aktualizuj-Status
+}
+
+function Nazwa-ZAdresu([string]$email) {
+    # jan.kowalski@firma.pl -> Jan Kowalski
+    $czesci = @(($email -split '@')[0] -split '[._-]' | Where-Object { $_ })
+    (($czesci | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }) -join ' ')
+}
+
+function Dane-KontaPoczty {
+    $email = $txtPEmail.Text.Trim()
+    if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Info 'Wpisz poprawny adres e-mail.'; $txtPEmail.Focus() | Out-Null; return $null }
+    if (-not $txtPHaslo.Text) { Info 'Wpisz hasło do skrzynki.'; $txtPHaslo.Focus() | Out-Null; return $null }
+    $portPop = 0; $portSmtp = 0
+    if (-not [int]::TryParse($txtPPortPop3.Text.Trim(), [ref]$portPop) -or $portPop -lt 1 -or $portPop -gt 65535) { Info 'Niepoprawny port POP3.'; return $null }
+    if (-not [int]::TryParse($txtPPortSmtp.Text.Trim(), [ref]$portSmtp) -or $portSmtp -lt 1 -or $portSmtp -gt 65535) { Info 'Niepoprawny port SMTP.'; return $null }
+    if (-not $txtPPop3.Text.Trim() -or -not $txtPSmtp.Text.Trim()) { Info 'Wpisz serwery POP3 i SMTP.'; return $null }
+    $login = $txtPLogin.Text.Trim()
+    if (-not $login) { $login = $email }
+    $nazwa = $txtPNazwa.Text.Trim()
+    if (-not $nazwa) { $nazwa = Nazwa-ZAdresu $email }
+    $dni = 0
+    if ($chkPZostaw.Checked) { $dni = 14 }
+    [pscustomobject]@{ Email = $email; Login = $login; Haslo = $txtPHaslo.Text; Nazwa = $nazwa; Pop3 = $txtPPop3.Text.Trim(); PortPop3 = $portPop
+        Smtp = $txtPSmtp.Text.Trim(); PortSmtp = $portSmtp; ZostawDni = $dni; Profil = ''; Pst = '' }
+}
+
+function Sciezka-PstKlienta([string]$email) {
+    $dok = ''
+    try { $dok = [string](Foldery-Profilu $stan.Klient).Dokumenty } catch { }
+    if (-not $dok) { $dok = Join-Path $stan.Klient.Sciezka 'Documents' }
+    # plik danych Outlooka nie powinien lezec w OneDrive
+    if ($dok -match 'OneDrive') { $f = Join-Path $stan.Klient.Sciezka 'AppData\Local\Microsoft\Outlook' }
+    else { $f = Join-Path $dok 'Pliki programu Outlook' }
+    if (-not (Test-Path -LiteralPath $f)) { New-Item -ItemType Directory -Force -Path $f | Out-Null }
+    Join-Path $f ($email + '.pst')
+}
+
+function Haslo-DoSchowka([string]$haslo) {
+    try {
+        [System.Windows.Forms.Clipboard]::SetText($haslo)
+        $stan.HasloWSchowku = $haslo
+        $zegarSchowka.Stop()
+        $zegarSchowka.Start()
+        return $true
+    } catch { return $false }
+}
+
+function Dodaj-KontoPoczty {
+    $k = Dane-KontaPoczty
+    if (-not $k) { return }
+    if (-not (Wymaga-Admina)) { return }
+    $outlook = Sciezka-Outlooka
+    if (-not $outlook) { Info 'Nie znaleziono klasycznego Outlooka (Microsoft Office). Zainstaluj Office albo dodaj konto w innym programie pocztowym.'; return }
+    $wersja = Wersja-Outlooka $outlook
+    $juz = @(Konta-Outlooka | Where-Object { $_.Email -eq $k.Email })
+    if ($juz.Count -and -not (Pytanie ('Konto ' + $k.Email + ' już jest w Outlooku (profil ' + $juz[0].Profil + ', ' + $juz[0].Typ + ').' + $NL + 'Dodać je jeszcze raz?'))) { return }
+    Zajety $true
+    try {
+        Log ('Poczta: sprawdzam logowanie ' + $k.Login + ' na ' + $k.Pop3 + ':' + $k.PortPop3 + '...')
+        $test = Sprawdz-LoginPop3 $k.Pop3 $k.PortPop3 $k.Login $k.Haslo
+        Log ('  ' + $test.Opis)
+        if (-not $test.Ok -and -not (Pytanie ('Serwer nie przyjął logowania:' + $NL + $test.Opis + $NL + $NL + 'Dodać konto mimo to?'))) { return }
+        if (-not (Zamknij-Outlooka)) { Log '  anulowano - Outlook jest otwarty.'; return }
+
+        $profile = Profile-Outlooka $wersja
+        if ($profile.Domyslny) {
+            $k.Profil = $profile.Domyslny
+            if (-not (Profil-MaMagazyn $wersja $k.Profil)) { $k.Pst = Sciezka-PstKlienta $k.Email }
+            $kopia = Kopia-ProfiliOutlooka $wersja
+            if ($kopia) { Log ('  kopia ustawień Outlooka (do przywrócenia dwuklikiem): ' + $kopia) }
+        } else {
+            $k.Profil = 'Outlook'
+            $k.Pst = Sciezka-PstKlienta $k.Email
+        }
+        [void](Ustaw-Autokonfiguracje $k $wersja)
+        $prf = Join-Path (Folder-Poczty) ('konto_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.prf')
+        # Outlook czyta plik profilu w kodowaniu systemu (polskie litery w nazwie nadawcy)
+        [IO.File]::WriteAllText($prf, (Tekst-Prf $k), [System.Text.Encoding]::Default)
+        $kto = $env:USERNAME
+        if ($stan.InneKonto) { $kto = $stan.Klient.Nazwa }
+        Log ('  otwieram Outlooka na koncie ' + $kto + ' z gotowymi ustawieniami (profil: ' + $k.Profil + ')...')
+        $argumenty = '/importprf "' + $prf + '"'
+        if (-not (Uruchom-JakoKlient $outlook $argumenty)) {
+            Log '  uruchamiam Outlooka bezpośrednio.'
+            Start-Process -FilePath $outlook -ArgumentList $argumenty
+        }
+        $wSchowku = Haslo-DoSchowka $k.Haslo
+        $jest = $null
+        $koniec = (Get-Date).AddSeconds(120)
+        while ((Get-Date) -lt $koniec -and -not $jest) {
+            Czekaj 2000
+            $jest = @(Konta-Outlooka | Where-Object { $_.Email -eq $k.Email -and $_.Typ -eq 'POP3' }) | Select-Object -First 1
+        }
+        Wypelnij-KontaPoczty
+        if ($jest) {
+            Remove-Item -LiteralPath $prf -Force -ErrorAction SilentlyContinue
+            Zapisz-Prace 'Poczta' ('Dodano konto POP3 w Outlooku: ' + $k.Email)
+            Log ('  konto ' + $k.Email + ' jest w Outlooku (profil ' + $jest.Profil + ').')
+            $t = 'Konto ' + $k.Email + ' jest w Outlooku.' + $NL + $NL + 'Przy pierwszym odbieraniu poczty Outlook zapyta o hasło'
+            if ($wSchowku) { $t = $t + ' - jest już w schowku: kliknij w pole hasła, wciśnij Ctrl+V i zaznacz "Zapisz to hasło". Schowek wyczyści się sam za 3 minuty.' }
+            else { $t = $t + ' - wpisz je i zaznacz "Zapisz to hasło".' }
+            Info $t
+            $txtPHaslo.Text = ''
+        } else {
+            Log '  Outlook nie potwierdził dodania konta w ciągu 2 minut.'
+            Info ('Outlook nie potwierdził dodania konta - sprawdź jego okno (może o coś pyta).' + $NL + $NL +
+                'Gdyby konta nie było: Panel sterowania > Poczta > Konta e-mail > Nowy - wystarczy imię, adres i hasło, ' +
+                'serwery POP3 i SMTP Outlook weźmie sam (program je zapisał dla domeny ' + (($k.Email -split '@')[-1]) + ').')
+        }
+    } finally {
+        Zajety $false
+    }
+}
+
+$chkPPokaz.Add_CheckedChanged({ $txtPHaslo.UseSystemPasswordChar = -not $chkPPokaz.Checked })
+$btnPOdswiez.Add_Click({ Wypelnij-KontaPoczty })
+$btnPDodaj.Add_Click({ Dodaj-KontoPoczty })
+$btnPSprawdz.Add_Click({
+    $k = Dane-KontaPoczty
+    if (-not $k) { return }
+    Zajety $true
+    try {
+        Log ('Poczta: sprawdzam logowanie ' + $k.Login + ' na ' + $k.Pop3 + ':' + $k.PortPop3 + '...')
+        $w = Sprawdz-LoginPop3 $k.Pop3 $k.PortPop3 $k.Login $k.Haslo
+        Log ('  ' + $w.Opis)
+        if ($w.Ok) { Info ('Login i hasło do ' + $k.Email + ' są poprawne.') } else { Info ('Nie udało się zalogować:' + $NL + $w.Opis) }
+    } finally {
+        Zajety $false
+    }
+})
+$btnPPanel.Add_Click({
+    $o = Sciezka-Outlooka
+    $cpl = 'mlcfg32.cpl'
+    if ($o) {
+        $c = Join-Path (Split-Path -Parent $o) 'MLCFG32.CPL'
+        if (Test-Path -LiteralPath $c) { $cpl = $c }
+    }
+    $control = Join-Path $env:windir 'System32\control.exe'
+    if (-not (Uruchom-JakoKlient $control ('"' + $cpl + '"'))) { Start-Process -FilePath $control -ArgumentList ('"' + $cpl + '"') }
+})
+$siatkaP.Add_CellDoubleClick({
+    param($nadawca, $e)
+    if ($e.RowIndex -ge 0) { $txtPEmail.Text = [string]$siatkaP.Rows[$e.RowIndex].Tag.Email; $txtPHaslo.Focus() | Out-Null }
+})
+
+# =====================================================================
 #  START
 # =====================================================================
 $zakladki.Add_SelectedIndexChanged({
@@ -6593,6 +7137,7 @@ $zakladki.Add_SelectedIndexChanged({
             elseif ($t -eq $tabSprzet) { Wypelnij-Sprzet }
             elseif ($t -eq $tabSterowniki) { Wypelnij-Sterowniki }
             elseif ($t -eq $tabKopia) { Wypelnij-Kopie; Przelicz-Kopie }
+            elseif ($t -eq $tabPoczta) { Wypelnij-KontaPoczty }
         } finally {
             Zajety $false
         }
@@ -6606,7 +7151,10 @@ $form.Add_FormClosing({
     if ($stan.Zajety -gt 0) {
         $e.Cancel = $true
         Info 'Poczekaj, aż skończy się bieżąca operacja (postęp widać w dzienniku na dole okna).'
+        return
     }
+    if ($stan.HasloWSchowku) { try { [System.Windows.Forms.Clipboard]::Clear() } catch { } }
+    Usun-StareZadania
 })
 
 $form.Add_Shown({
